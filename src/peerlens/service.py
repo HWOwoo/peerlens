@@ -126,10 +126,13 @@ def filing_index():
     global _index
     with _index_lock:
         if _index is None:
+            import atexit
+
             from peerlens.retrieval.index import FilingIndex
             from peerlens.retrieval.providers import default_embedder, default_reranker
 
             _index = FilingIndex(default_embedder(), default_reranker())
+            atexit.register(_index.qdrant.close)  # 종료 시 잠금 파일 정리
         return _index
 
 
@@ -157,20 +160,33 @@ def search_evidence(
             "rerank_model": idx.reranker.model if idx.reranker else None,
             "fusion": "RRF(k=60) of dense + BM25",
         },
-        "results": [
-            {
-                "rank": e.rank,
-                "score": e.score,
-                "fused_rank": e.fused_rank,
-                "dense_rank": e.dense_rank,
-                "sparse_rank": e.sparse_rank,
-                **{k_: e.chunk[k_] for k_ in (
-                    "chunk_id", "ticker", "company", "form", "accn", "filed", "report_date", "section", "section_label",
-                    "item", "subheading", "text", "source_url", "anchor_url", "retrieved_at",
-                )},
-            }
-            for e in hits
-        ],
+        "results": [_hit_dict(e) for e in hits],
+    }
+
+
+def _hit_dict(e) -> dict[str, Any]:
+    return {
+        "rank": e.rank, "score": e.score, "fused_rank": e.fused_rank, "dense_rank": e.dense_rank, "sparse_rank": e.sparse_rank,
+        **{k_: e.chunk[k_] for k_ in (
+            "chunk_id", "ticker", "company", "form", "accn", "filed", "report_date", "section", "section_label",
+            "item", "subheading", "text", "source_url", "anchor_url", "retrieved_at",
+        )},
+    }
+
+
+def search_evidence_per_ticker(
+    query: str, k_by_ticker: dict[str, int], *, sections: list[str] | None = None, keywords: str | None = None
+) -> dict[str, Any]:
+    import time
+
+    idx = filing_index()
+    t0 = time.perf_counter()
+    with _index_lock:
+        by_t = idx.search_per_ticker(query, k_by_ticker, sections=sections, keyword_query=keywords)
+    return {
+        "query": query,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+        "results": [_hit_dict(e) for t in k_by_ticker for e in by_t.get(t, [])],
     }
 
 

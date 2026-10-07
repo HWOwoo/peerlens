@@ -133,6 +133,15 @@ def test_index_is_idempotent(index):
     assert index.count("TST") == len(chunks)
 
 
+def test_search_per_ticker_respects_quota(index):
+    chunks = _chunks()
+    other = [c.__class__(**{**c.to_payload(), "ticker": "OTH", "chunk_id": c.chunk_id.replace("TST", "OTH")}) for c in chunks]
+    index.index_chunks(chunks + other)
+    res = index.search_per_ticker("customer concentration", {"TST": 2, "OTH": 1})
+    assert len(res["TST"]) == 2 and len(res["OTH"]) == 1
+    assert all(e.chunk["ticker"] == "OTH" for e in res["OTH"])
+
+
 def test_search_filters_and_reports_stage_ranks(index):
     index.index_chunks(_chunks())
     hits = index.search("customer concentration", sections=["risk_factors"], k=2)

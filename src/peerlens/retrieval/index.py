@@ -182,6 +182,65 @@ class FilingIndex:
             out.append(Evidence(chunk=pl, score=float(sc), rank=rank, fused_rank=fr, dense_rank=dr, sparse_rank=sr))
         return out
 
+    def search_per_ticker(
+        self,
+        query: str,
+        k_by_ticker: dict[str, int],
+        *,
+        sections: list[str] | None = None,
+        keyword_query: str | None = None,
+        pool_per_ticker: int = 6,
+        candidates: int = 20,
+    ) -> dict[str, list[Evidence]]:
+        """여러 기업에서 기업별 k개씩. 질문 임베딩 1회 + 리랭커 1회로 처리한다 (API 호출·분당 한도 절약).
+
+        한 번에 전체를 검색하면 리랭커가 한 회사 문단만 고르는 경향이 있어, 후보는 기업별로 모으고
+        순위는 리랭커 점수를 공통 기준으로 매긴다.
+        """
+        dense_vec = self.embedder.embed([query], "search_query")[0]
+        s_idx, s_val = bm25.query_vector(keyword_query or query)
+        pool: list[tuple[str, dict[str, Any], int, int | None, int | None]] = []  # (pid, payload, fused, dense, sparse)
+        seen: set[tuple[str, str]] = set()
+        for ticker in k_by_ticker:
+            flt = _filter([ticker], sections)
+            dense = [str(p.id) for p in self.qdrant.query_points(
+                self.collection, query=dense_vec, using="dense", query_filter=flt, limit=candidates, with_payload=False).points]
+            sparse = [str(p.id) for p in self.qdrant.query_points(
+                self.collection, query=models.SparseVector(indices=s_idx, values=s_val), using="bm25",
+                query_filter=flt, limit=candidates, with_payload=False).points] if s_idx else []
+            fused = rrf([dense, sparse])[: pool_per_ticker * 2]
+            if not fused:
+                continue
+            payloads = {str(p.id): p.payload for p in self.qdrant.retrieve(self.collection, ids=[pid for pid, _ in fused], with_payload=True)}
+            n = 0
+            for fr, (pid, _) in enumerate(fused, 1):
+                pl = payloads.get(pid)
+                key = (ticker, " ".join(pl["text"].split())[:400]) if pl else None
+                if pl is None or key in seen:
+                    continue
+                seen.add(key)
+                pool.append((pid, pl, fr, dense.index(pid) + 1 if pid in dense else None, sparse.index(pid) + 1 if pid in sparse else None))
+                n += 1
+                if n >= pool_per_ticker:
+                    break
+        if not pool:
+            return {}
+
+        if self.reranker is None:
+            scored = [(i, 1.0 / item[2]) for i, item in enumerate(pool)]
+        else:
+            hits = self.reranker.rerank(query, [_rerank_text(pl) for _, pl, *_ in pool], top_n=len(pool))
+            scored = [(h.index, h.score) for h in hits]
+        scored.sort(key=lambda x: -x[1])
+
+        out: dict[str, list[Evidence]] = {t: [] for t in k_by_ticker}
+        for idx, score in scored:
+            pid, pl, fr, dr, sr = pool[idx]
+            t = pl["ticker"]
+            if len(out[t]) < k_by_ticker[t]:
+                out[t].append(Evidence(chunk=pl, score=float(score), rank=len(out[t]) + 1, fused_rank=fr, dense_rank=dr, sparse_rank=sr))
+        return out
+
 
 def _rerank_text(pl: dict[str, Any]) -> str:
     head = f"{pl['company']} ({pl['ticker']}) {pl['form']} — {pl['section_label']}"

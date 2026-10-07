@@ -1,0 +1,64 @@
+[
+  {
+    "id": "q01",
+    "request": "NVIDIA를 반도체 Peer와 비교해서 투자 검토 메모 써줘. 특히 수익성과 중국 리스크가 궁금해.",
+    "expect_target": "NVDA",
+    "must_mention": ["중국", "영업이익률"]
+  },
+  {
+    "id": "q02",
+    "request": "AMD를 AI 가속기 경쟁사들과 비교해 성장성과 공급망 리스크 중심으로 검토 메모 작성",
+    "expect_target": "AMD",
+    "must_mention": ["성장", "공급"]
+  },
+  {
+    "id": "q03",
+    "request": "퀄컴을 Peer와 비교해서 스마트폰 의존도와 수익성 관점의 메모를 써줘",
+    "expect_target": "QCOM",
+    "must_mention": ["스마트폰"]
+  },
+  {
+    "id": "q04",
+    "request": "인텔의 수익성이 왜 Peer 대비 나빠졌는지, 파운드리 사업 관련 공시 근거와 함께 검토해줘",
+    "expect_target": "INTC",
+    "must_mention": ["파운드리", "영업이익률"]
+  },
+  {
+    "id": "q05",
+    "request": "브로드컴을 반도체 Peer와 비교해줘. VMware 인수 이후 인프라 소프트웨어 사업과 수익성 변화가 궁금해",
+    "expect_target": "AVGO",
+    "must_mention": ["소프트웨어"]
+  },
+  {
+    "id": "q06",
+    "request": "TSMC를 글로벌 반도체 Peer와 비교해서 첨단 공정 경쟁력과 지정학적 리스크를 정리해줘",
+    "expect_target": "TSM",
+    "must_mention": ["지정학", "공정"]
+  },
+  {
+    "id": "q07",
+    "request": "마이크론을 Peer와 비교해서 메모리 업황 변동성과 HBM 관련 내용을 중심으로 검토 메모 써줘",
+    "expect_target": "MU",
+    "must_mention": ["HBM", "메모리"]
+  },
+  {
+    "id": "q08",
+    "request": "어플라이드 머티어리얼즈를 램리서치, KLA와 비교해서 중국 매출과 수출 규제 리스크를 검토해줘",
+    "expect_target": "AMAT",
+    "expect_peers": ["LRCX", "KLAC"],
+    "must_mention": ["중국", "수출"]
+  },
+  {
+    "id": "q09",
+    "request": "텍사스 인스트루먼트를 ADI, 마이크로칩, 온세미와 비교해서 재고와 수익성 사이클을 검토해줘",
+    "expect_target": "TXN",
+    "expect_peers": ["ADI", "MCHP", "ON"],
+    "must_mention": ["재고"]
+  },
+  {
+    "id": "q10",
+    "request": "마이크로소프트를 빅테크 Peer와 비교해서 AI 인프라 투자와 현금흐름 관점의 메모를 작성해줘",
+    "expect_target": "MSFT",
+    "must_mention": ["AI", "현금흐름"]
+  }
+]

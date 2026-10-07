@@ -2,7 +2,22 @@
 
 공시 근거 기반 글로벌 Peer 비교·투자메모 AI Agent — 「국부펀드 KIC, AI 에이전트 공모전」 출품작.
 
-> 현재 단계: Phase 1 PoC — XBRL 재무 비교 · 공시 원문 근거 검색 · Agent 루프 v0
+> 현재 단계: Phase 1 PoC 완료 — XBRL 재무 비교 · 공시 원문 근거 검색 · Agent 루프 v0 · 평가
+
+![AI 투자메모 화면](docs/screenshots/01_ai_memo_first_view.png)
+
+## 평가 결과 (질문 10개, 2026-10-07)
+
+| 지표 | 결과 |
+|---|---|
+| 성공률 | 10/10 |
+| 평균 소요 시간 | 58초 |
+| 수치 일치율 (SEC 원본에서 독립 재계산) | 100% (184/184) |
+| LLM이 직접 쓴 숫자 | 0개 |
+| 인용 원문 존재율 (인용 문단의 모든 줄이 원문에 존재) | 97.1% (66/68) |
+| 근거 일치율 (다른 모델의 독립 재판정) | 98.8% (79/80) |
+
+상세: [eval/REPORT.md](eval/REPORT.md) · 재현: `python eval/run_eval.py`
 
 ## Agent 구조 (LangGraph)
 

@@ -16,8 +16,12 @@ PLACEHOLDER = re.compile(r"\[\[([A-Za-z0-9_.:\-]+)\]\]")
 # 숫자처럼 보이지만 수치 주장이 아닌 표기 (공시 양식·회계연도·섹션 번호)
 # \b는 한글 조사("Item 1A에")를 단어 문자로 봐서 경계로 인식하지 못하므로 영숫자만 기준으로 경계를 잡는다
 _ALLOWED_NUMERIC = re.compile(
-    r"(?<![A-Za-z0-9])(?:10-K|10-Q|20-F|40-F|8-K|(?:FY|CY)\d{4}|\d{4}년|Item\s+\d{1,2}[A-D]?|Q[1-4])(?![A-Za-z0-9])",
-    re.IGNORECASE,
+    r"(?<![A-Za-z0-9])(?:10-K|10-Q|20-F|40-F|8-K|(?:FY|CY)\d{4}|\d{4}년|Item\s+\d{1,2}[A-D]?|Q[1-4])(?![A-Za-z0-9])"
+    # 기간 길이 표기: "최근 12개월", "3년간"
+    r"|(?<![\d.,])\d{1,2}(?:개월|년간)"
+    # 제품·공정·규격 이름: H100, MI308, HBM3E, B200 (영문자로 시작) / 18A, 5G, 3nm (숫자+영문, 금액·배수 단위 B·M·K·T·x 제외)
+    r"|(?<![A-Za-z0-9$.,])[A-Za-z]+\d+[A-Za-z0-9]*"
+    r"|(?<![A-Za-z0-9$.,])\d+(?![BMKTbmktxX%])[A-Za-z]+[A-Za-z0-9]*",
 )
 
 
@@ -83,7 +87,56 @@ def build_metric_refs(comparison: dict[str, Any]) -> dict[str, MetricRef]:
             refs[did] = MetricRef(did, f"{target} − Peer 중앙값 {label[p['metric']]} {yl}{p['year']}",
                                   t.value - p["median"], _pp(t.value - p["median"]), t.metric_ids,
                                   f"{target} {p['metric']} − median(peers)")
+
+    # 최근 12개월(TTM)·최근 분기(Q): 회사마다 기준일이 달라 라벨에 기간을 붙인다
+    stale = set(comparison.get("stale", []))
+    for c in comparison.get("recent_cells", []):
+        pt = c["period_type"]
+        rid = f"{c['ticker']}.{c['metric']}.{pt}"
+        note = " · 오래된 데이터" if c["ticker"] in stale else ""
+        what = "전년 동기 대비" if (pt == "Q" and c["metric"] == "revenue_growth") else ""
+        refs[rid] = MetricRef(rid, f"{c['ticker']} {label[c['metric']]}{what} [{c['period_label']}{note}]", c["value"], _pct(c["value"]),
+                              [c["metric_id"]], formula[c["metric"]])
+    for p in comparison.get("recent_median", []):
+        pt = p["period_type"]
+        rid = f"PEER.{p['metric']}.{pt}"
+        refs[rid] = MetricRef(rid, f"Peer 중앙값 {label[p['metric']]} [{'최근 12개월' if pt == 'TTM' else '최근 분기'}] (n={p['n']})",
+                              p["median"], _pct(p["median"]), [], p["formula"])
+        t = refs.get(f"{target}.{p['metric']}.{pt}")
+        if t is not None and t.value is not None and p["median"] is not None:
+            did = f"DIFF.{p['metric']}.{pt}"
+            refs[did] = MetricRef(did, f"{target} − Peer 중앙값 {label[p['metric']]} [{pt}]", t.value - p["median"],
+                                  _pp(t.value - p["median"]), t.metric_ids, f"{target} {p['metric']} {pt} − median(peers)")
+    for tkr, per in comparison.get("recent_periods", {}).items():
+        sc = per.get("scale")
+        if sc:
+            rid = f"{tkr}.revenue.SCALE"
+            refs[rid] = MetricRef(rid, f"{tkr} 매출 규모 [{sc['label']}]", sc["value"], _money(sc["value"], sc["unit"]), [], f"revenue ({sc['how']})")
+
+    # 분석용 파생 수치 (코드 계산): 순위, 3년 변화폭
+    tickers = comparison["tickers"]
+    for name in label:
+        # 최근 12개월 순위 (오래된 데이터 제외, 높을수록 1위)
+        vals = [(r.value, t) for t in tickers if t not in stale and (r := refs.get(f"{t}.{name}.TTM")) and r.value is not None]
+        mine = refs.get(f"{target}.{name}.TTM")
+        if mine is not None and mine.value is not None and target not in stale and len(vals) >= 2:
+            rank = 1 + sum(1 for v, _ in vals if v > mine.value)
+            rid = f"RANK.{name}.TTM"
+            refs[rid] = MetricRef(rid, f"{target} {label[name]} 순위 [최근 12개월, {len(vals)}개사 중]", float(rank),
+                                  f"{rank}위/{len(vals)}개사", mine.metric_ids, f"rank of {target} among {len(vals)} (높을수록 1위)")
+        # 연간 첫해 → 마지막 해 변화폭 (대상 기업)
+        years = comparison["years"]
+        a, b = refs.get(f"{target}.{name}.{years[0]}"), refs.get(f"{target}.{name}.{years[-1]}")
+        if a and b and a.value is not None and b.value is not None and name != "revenue_growth":
+            rid = f"{target}.{name}.CHG"
+            refs[rid] = MetricRef(rid, f"{target} {label[name]} 변화폭 [{yl}{years[0]}→{yl}{years[-1]}]", b.value - a.value,
+                                  _pp(b.value - a.value), a.metric_ids + b.metric_ids, f"{name}[{years[-1]}] − {name}[{years[0]}]")
     return refs
+
+
+def _money(v: float, unit: str) -> str:
+    sym = {"USD": "$", "EUR": "€", "TWD": "NT$", "JPY": "¥", "KRW": "₩"}.get(unit, "")
+    return f"{sym}{v / 1e9:,.1f}B" if sym else f"{v / 1e9:,.1f}B {unit}"
 
 
 def stray_numbers(text: str) -> list[str]:

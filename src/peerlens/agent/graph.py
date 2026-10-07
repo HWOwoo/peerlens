@@ -22,7 +22,7 @@ from peerlens import service
 from peerlens.agent.llm import LLM, LLMCall
 from peerlens.agent.peers import PeerFinder
 from peerlens.agent.refs import PLACEHOLDER, RefTable, build_metric_refs, render_text, segments, stray_numbers
-from peerlens.agent.schemas import Judgements, Memo, Plan, PeerSelection, Revision
+from peerlens.agent.schemas import AnalysisPlan, Judgements, Memo, Plan, PeerSelection, Revision
 from peerlens.config import PROJECT_ROOT
 from peerlens.metrics.calc import METRICS
 
@@ -35,6 +35,7 @@ NODE_TITLES = {
     "financials": "재무 수치 수집·계산",
     "ensure_index": "공시 원문 색인 확인",
     "research": "공시 근거 검색",
+    "analyze": "분석 설계",
     "write": "메모 작성",
     "verify": "검증",
     "revise": "재검색·재작성",
@@ -51,6 +52,8 @@ class State(TypedDict, total=False):
     peers: list[str]
     peer_report: list[dict[str, Any]]
     comparison: dict[str, Any]
+    analysis: dict[str, Any]  # AnalysisPlan
+    analysis: dict[str, Any]  # AnalysisPlan
     memo: dict[str, Any]  # {"title", "blocks": [{"heading", "sentences": [{id, kind, text, evidence_ids}]}]}
     checks: dict[str, dict[str, Any]]  # sentence_id → 검증 결과
     attempt: int
@@ -70,27 +73,41 @@ PEER_SYSTEM = """너는 Peer 선정 담당이다. 도구가 계산한 후보 점
 대상 기업과 사업이 실제로 경쟁하거나 비교 가치가 있는 기업을 고른다. 4~6개를 포함(include=true)하고, 모든 후보에 한 문장 이유를 쓴다.
 점수가 높아도 사업이 다르면 제외하고, 점수가 조금 낮아도 핵심 경쟁사면 포함할 수 있다. 이유에 숫자는 쓰지 않는다."""
 
-WRITER_SYSTEM = """너는 국부펀드 해외주식 리서치팀의 투자 검토 메모 작성 담당이다. 주어진 '수치 참조 목록'과 '공시 근거 목록'만 사용해 한국어 메모를 쓴다.
-규칙:
+COMMON_RULES = """규칙:
 1. 숫자(%, 금액, 배수, 순위, 개수)를 직접 쓰지 않는다. 수치는 반드시 [[참조ID]] 형태로만 쓴다. 목록에 없는 수치는 언급하지 않는다. 연도 표기(FY2025, CY2025)와 양식명(10-K)은 써도 된다.
-2. 문장 종류
-   - quant: 수치 비교. 반드시 [[ID]]를 포함.
-   - qual: 공시 내용 서술. evidence_ids에 근거 E번호 필수. 근거 문단에 실제로 있는 내용만, 과장·추측 금지.
-   - view: 앞의 사실에서 도출한 검토 의견. 새로운 사실이나 수치를 주장하지 않는다.
-3. 근거 문단은 영어다. 의미를 정확히 한국어로 옮긴다. 회사명은 티커와 함께 쓴다 (예: 엔비디아(NVDA)).
-4. 매수·매도 권고, 목표가는 쓰지 않는다. 판단은 '검토 포인트'로 표현한다.
-5. 한 문장에는 한 가지 주장만. 간결하게.
-6. 요청에 나온 관심사 표현(예: '지정학적 리스크', '공급망')은 메모에서도 그 표현 그대로 쓴다.
-구성: title / summary(핵심 요약 3문장) / sections 4개:
- ① "Peer 구성" — 어떤 기업을 어떤 관점에서 비교했는지 (view 1~2문장, 숫자 없이)
- ② "재무 비교" — 성장성·수익성·효율성 (quant 위주 4~6문장, 대상 기업 vs Peer 중앙값 대비를 중심으로)
- ③ "공시로 본 사업·리스크" — (qual 위주 5~7문장, 요청이 강조한 관심사 포함). 대상 기업만 쓰지 말고
-    Peer 근거도 최소 2개 기업을 인용해 대상 기업과 비교·대조한다 (예: 같은 리스크를 Peer는 어떻게 공시했는지)
- ④ "검토 포인트" — 추가 확인이 필요한 사항 (view 2~3문장)"""
+2. 근거 문단은 영어다. 의미를 정확히 한국어로 옮기고, 근거보다 강하게 단정하지 않는다. 회사명은 티커와 함께 쓴다 (예: 엔비디아(NVDA)).
+3. 매수·매도 권고, 목표가는 쓰지 않는다. 판단은 '검토 포인트'로 표현한다.
+4. 요청에 나온 관심사 표현(예: '지정학적 리스크', '공급망')은 그 표현 그대로 쓴다.
+5. 기간: 현재 수준은 최근 12개월(.TTM), 추세는 연도별(.연도)과 변화폭(.CHG), 최근 모멘텀은 최근 분기(.Q, 성장률은 전년 동기 대비).
+   기업마다 기준 분기가 달라 기간을 문장에 밝힌다. '오래된 데이터' 기업은 기간을 꼭 밝힌다. 규모는 [[티커.revenue.SCALE]], 순위는 [[RANK.지표.TTM]]."""
 
-JUDGE_SYSTEM = """너는 투자 메모 검증 담당이다. 각 한국어 문장이 인용한 영어 공시 근거 문단에 의해 뒷받침되는지 판정한다.
-- supported: 근거 문단이 문장의 주장 전부를 직접 뒷받침 (자연스러운 번역·요약 차이는 허용)
-- partial: 일부만 뒷받침되거나, 근거보다 강하게 단정함
+ANALYST_SYSTEM = """너는 국부펀드 해외주식 리서치팀의 시니어 애널리스트다. 메모를 쓰기 전에 분석을 설계한다.
+수치 참조 목록(코드가 계산한 값)과 공시 근거 목록만 보고, '무엇이 다른가 → 왜 그런가(공시 근거) → 그래서 투자 검토에 무슨 의미인가'를 정리한다.
+- 수치를 나열하지 말고 의미 있는 차이·변화(순위, 변화폭, 최근 분기 가속·둔화)를 골라 해석한다.
+- 인사이트마다 수치 참조와 그 원인을 설명하는 공시 근거를 짝짓는다. 근거가 없으면 원인을 지어내지 말고 watch(확인할 점)로 둔다.
+- Peer 대비는 Peer 티커를 밝히고, Peer의 수치나 공시와 실제로 대조한다.
+- watch_items는 '다음 10-Q에서 데이터센터 매출 비중 추이 확인'처럼 무엇을 어디서 확인할지 구체적으로.
+""" + COMMON_RULES
+
+WRITER_SYSTEM = """너는 국부펀드 해외주식 리서치팀의 투자 검토 메모 작성 담당이다. 시니어가 설계한 '분석 설계'를 뼈대로,
+'수치 참조 목록'과 '공시 근거 목록'만 사용해 한국어 메모를 쓴다. 투자위원회가 읽는 문서처럼 결론부터, 해석 중심으로 쓴다.
+""" + COMMON_RULES + """
+6. 문장 종류
+   - quant: 수치 비교. [[ID]] 필수. 원인을 함께 말하면 그 근거 E번호를 evidence_ids에 넣는다 (예: "…높은데, 이는 …때문이라고 공시했다").
+   - qual: 공시 내용 서술. evidence_ids 필수. 근거 문단에 실제로 있는 내용만.
+   - view: 앞 문장들에서 도출한 해석·시사점. 새로운 사실이나 수치를 주장하지 않는다.
+7. 같은 문장 틀("X는 a로 Peer 중앙값 b를 c 상회했다")을 반복하지 않는다. 여러 지표를 한 문장에 묶고, 순위·변화폭·최근 분기로 변화를 보여 준다.
+구성: title / summary(3문장: 논지 · 핵심 근거 · 핵심 리스크) / sections 4개:
+ ① "비교 기준" — Peer 구성 관점과 비교 기간 기준 (view 1~2문장)
+ ② "재무 비교와 동인" — 규모·성장·수익성·현금창출을 묶어 해석하고, 차이의 원인을 공시 근거로 설명 (quant+qual 5~7문장)
+ ③ "공시로 본 리스크와 Peer 대비" — 요청 관심사 중심, Peer 근거를 최소 2개 기업 인용해 대조 (qual 위주 4~6문장)
+ ④ "검토 포인트" — 분석 설계의 watch_items를 구체적 확인 항목으로 (view 2~3문장)"""
+
+JUDGE_SYSTEM = """너는 투자 메모 검증 담당이다. 각 한국어 문장이 인용한 영어 공시 근거 문단에 의해 뒷받침되는지 엄격하게 판정한다.
+문장 속 수치(%, $, 순위)는 코드가 이미 검증했으니 판단하지 말고, 수치 외의 주장(사실·원인·대상)이 근거와 맞는지만 본다.
+- supported: 근거 문단이 수치 외 주장 전부를 직접 뒷받침 (자연스러운 번역·요약 차이는 허용)
+- partial: 일부만 뒷받침되거나, 근거보다 강하게 단정하거나, 근거에 없는 구체 대상·원인을 덧붙임
+  (예: 근거는 '상각비'인데 문장은 '무형자산 상각비', 근거는 '영향을 줄 수 있다'인데 문장은 '영향을 줬다')
 - unsupported: 근거에 없거나 모순
 판정 이유는 한국어 한 문장."""
 
@@ -297,15 +314,38 @@ def _with_ids(memo: Memo) -> dict[str, Any]:
     return {"title": memo.title, "blocks": blocks}
 
 
-@_node("write")
-def write_node(state: State, ctx: Ctx) -> State:
+def _context(state: State, ctx: Ctx) -> str:
     plan = state["plan"]
     peers_txt = "\n".join(f"- {p['ticker']}: {p['reason']}" for p in state["peer_report"] if p["include"])
     labels = ", ".join(METRICS[m].label_ko for m in plan["focus_metrics"] if m in METRICS)
-    user = (f"요청: {state['request']}\n관점: {plan['memo_angle']}\n강조 지표: {labels}\n"
+    return (f"요청: {state['request']}\n관점: {plan['memo_angle']}\n강조 지표: {labels}\n"
             f"대상: {state['target']}\nPeer와 선정 이유:\n{peers_txt}\n"
             f"데이터 유의사항: {'; '.join(state.get('notes', [])) or '없음'}\n\n"
             f"## 수치 참조 목록 (이 ID만 [[ ]]로 사용)\n{_metric_block(ctx)}\n\n## 공시 근거 목록\n{_evidence_block(ctx)}")
+
+
+def _analysis_text(a: dict[str, Any]) -> str:
+    lines = [f"논지: {a['thesis']}", "인사이트:"]
+    for i, x in enumerate(a["insights"], 1):
+        lines.append(f"{i}. [{x['type']}] {x['claim']} (수치 {', '.join(x['metric_refs']) or '-'} / 근거 {', '.join(x['evidence_ids']) or '-'})"
+                     f" → 시사점: {x['so_what']}")
+    lines.append("Peer 대비: " + " / ".join(a["peer_contrasts"]))
+    lines.append("확인할 점: " + " / ".join(a["watch_items"]))
+    return "\n".join(lines)
+
+
+@_node("analyze")
+def analyze_node(state: State, ctx: Ctx) -> State:
+    a, call = ctx.llm.parse(AnalysisPlan, system=ANALYST_SYSTEM, user=_context(state, ctx), name="analyst")
+    ctx.llm_event("analyze", call, "분석 설계 (논지·인사이트·Peer 대비·확인할 점)")
+    linked = sum(1 for x in a.insights if x.metric_refs and x.evidence_ids)
+    ctx.emit("result", "analyze", f"인사이트 {len(a.insights)}개 (수치+근거 연결 {linked}개)", a.thesis, a.model_dump())
+    return {"analysis": a.model_dump()}
+
+
+@_node("write")
+def write_node(state: State, ctx: Ctx) -> State:
+    user = f"## 분석 설계 (이 뼈대대로 쓴다)\n{_analysis_text(state['analysis'])}\n\n{_context(state, ctx)}"
     memo, call = ctx.llm.parse(Memo, system=WRITER_SYSTEM, user=user, name="writer")
     ctx.llm_event("write", call, "메모 초안 작성")
     m = _with_ids(memo)
@@ -337,7 +377,7 @@ def verify_node(state: State, ctx: Ctx) -> State:
         if s["kind"] == "qual" and not s["evidence_ids"]:
             problems.append("공시 서술 문장인데 근거가 없음")
         checks[s["id"]] = {"status": "fail" if problems else "pass", "problems": problems, "verdict": None, "reason": None}
-        if not problems and s["kind"] == "qual":
+        if not problems and s["evidence_ids"]:  # 원인 근거를 단 수치 문장도 판정
             to_judge.append(s)
     n_det_fail = sum(1 for c in checks.values() if c["status"] == "fail")
     ctx.emit("result", "verify", "규칙 검사", f"수치·참조·근거 규칙 위반 {n_det_fail}문장 / 전체 {len(checks)}문장")
@@ -420,7 +460,7 @@ def finalize_node(state: State, ctx: Ctx) -> State:
 def build_graph(ctx: Ctx):
     g = StateGraph(State)
     for name, fn in [("plan", plan_node), ("peers", peers_node), ("financials", financials_node),
-                     ("ensure_index", ensure_index_node), ("research", research_node), ("write", write_node),
+                     ("ensure_index", ensure_index_node), ("research", research_node), ("analyze", analyze_node), ("write", write_node),
                      ("verify", verify_node), ("revise", revise_node), ("finalize", finalize_node)]:
         g.add_node(name, lambda s, fn=fn: fn(s, ctx))
     g.add_edge(START, "plan")
@@ -428,7 +468,8 @@ def build_graph(ctx: Ctx):
     g.add_edge("peers", "financials")
     g.add_edge("financials", "ensure_index")
     g.add_edge("ensure_index", "research")
-    g.add_edge("research", "write")
+    g.add_edge("research", "analyze")
+    g.add_edge("analyze", "write")
     g.add_edge("write", "verify")
     g.add_conditional_edges("verify", route_after_verify, {"revise": "revise", "finalize": "finalize"})
     g.add_edge("revise", "verify")
@@ -448,7 +489,7 @@ def _render(state: State, ctx: Ctx) -> dict[str, Any]:
         blocks.append({"heading": b["heading"], "sentences": sents})
     all_s = [s for b in blocks for s in b["sentences"]]
     used_e = {e for s in all_s for e in s["evidence_ids"]}
-    qual = [s for s in all_s if s["kind"] == "qual"]
+    qual = [s for s in all_s if s["evidence_ids"]]  # 근거가 달린 문장 (공시 서술 + 원인을 단 수치 문장)
     quant = [s for s in all_s if s["kind"] == "quant"]
     return {
         "title": state["memo"]["title"],
@@ -468,6 +509,19 @@ def _render(state: State, ctx: Ctx) -> dict[str, Any]:
     }
 
 
+def _render_analysis(a: dict[str, Any] | None, ctx: Ctx) -> dict[str, Any] | None:
+    """분석 설계의 [[참조]]를 실제 값으로 바꿔 화면에 보여준다."""
+    if not a:
+        return None
+    r = lambda t: render_text(t, ctx.refs)[0]  # noqa: E731
+    return {
+        "thesis": r(a["thesis"]),
+        "insights": [{**x, "claim": r(x["claim"]), "so_what": r(x["so_what"])} for x in a["insights"]],
+        "peer_contrasts": [r(x) for x in a["peer_contrasts"]],
+        "watch_items": [r(x) for x in a["watch_items"]],
+    }
+
+
 def run_agent(request: str, emit: Emit | None = None) -> dict[str, Any]:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     ctx = Ctx(emit or (lambda e: None))
@@ -483,6 +537,7 @@ def run_agent(request: str, emit: Emit | None = None) -> dict[str, Any]:
             "peer_report": state["peer_report"],
             "comparison": state["comparison"],
             "notes": state.get("notes", []),
+            "analysis": _render_analysis(state.get("analysis"), ctx),
             "memo": _render(state, ctx),
         })
     except Exception as e:  # 실패도 Trace로 남긴다

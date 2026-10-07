@@ -39,6 +39,8 @@ def test_metric_refs_include_company_median_and_diff():
     ("FY2025 10-K Item 1A에 따르면 2025년 Q3에 변화가 있었다.", []),
     ("영업이익률은 60%로 높다.", ["60%"]),
     ("매출은 1,234억 달러다.", ["1,234"]),
+    ("최근 12개월 기준 3년간 개선됐고, Intel 18A·H100·HBM3E·5G 제품이 거론됐다.", []),  # 기간·제품명은 허용
+    ("매출은 $5B, 3x 성장했다.", ["5", "3"]),  # 금액·배수 단위는 여전히 금지
 ])
 def test_stray_numbers(text, stray):
     assert [s.strip() for s in stray_numbers(text)] == stray

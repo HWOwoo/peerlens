@@ -88,26 +88,81 @@ def recompute(metric_id: str) -> tuple[float | None, list[str]]:
     return v, problems
 
 
+def _fact_meta(fact_id: str) -> dict[str, Any]:
+    ticker = fact_id.split(":", 1)[0]
+    return next(f.to_dict() for f in service.company_facts(ticker) if f.fact_id == fact_id)
+
+
+def _sum_terms(terms: list[list]) -> tuple[float | None, list[str]]:
+    """[부호, fact_id] 목록을 SEC 원본 값으로 다시 더한다."""
+    total, problems = 0.0, []
+    for sign, fid in terms:
+        raw = _raw_value(_fact_meta(fid))
+        if raw is None:
+            problems.append(f"원본에 없음: {fid}")
+            return None, problems
+        total += sign * raw
+    return total, problems
+
+
+def recompute_recent(metric_id: str) -> tuple[float | None, list[str]]:
+    """TTM·분기 지표: 구성 내역(부호·원값 ID)대로 원본 값을 다시 더하고 지표 수식을 독립 적용."""
+    ticker = metric_id.split(":", 1)[0]
+    m = next(x for x in service.company_metrics(ticker) if x.metric_id == metric_id)
+    v: dict[str, float] = {}
+    problems: list[str] = []
+    for key, terms in (m.components or {}).items():
+        val, probs = _sum_terms(terms)
+        problems += probs
+        if val is None:
+            return None, problems
+        v[key] = val
+    try:
+        if m.metric == "revenue_growth":
+            out = v["revenue"] / v["revenue_prev"] - 1
+        elif m.metric == "gross_margin":
+            out = (v["gross_profit"] if "gross_profit" in v else v["revenue"] - v["cost_of_revenue"]) / v["revenue"]
+        elif m.metric == "operating_margin":
+            out = v["operating_income"] / v["revenue"]
+        elif m.metric == "net_margin":
+            out = v["net_income"] / v["revenue"]
+        elif m.metric == "rnd_intensity":
+            out = v["rnd_expense"] / v["revenue"]
+        elif m.metric == "fcf_margin":
+            out = (v["operating_cash_flow"] - v["capex"]) / v["revenue"]
+        elif m.metric == "roe":
+            eq = (v["equity"] + v["equity_prev"]) / 2 if "equity_prev" in v else v["equity"]
+            out = v["net_income"] / eq
+        else:
+            return None, [f"알 수 없는 지표 {m.metric}"]
+    except (KeyError, ZeroDivisionError) as e:
+        return None, problems + [f"재계산 불가: {e}"]
+    return out, problems
+
+
 def _shown(text: str) -> float | None:
-    m = re.search(r"([+−-]?)(\d+(?:\.\d+)?)", text)
+    m = re.search(r"([+−-]?)(\d[\d,]*(?:\.\d+)?)", text)
     if not m:
         return None
-    return float(m.group(2)) * (-1 if m.group(1) in ("−", "-") else 1)
+    return float(m.group(2).replace(",", "")) * (-1 if m.group(1) in ("−", "-") else 1)
 
 
 def check_numbers(result: dict[str, Any]) -> dict[str, Any]:
     comp = result["comparison"]
     target = comp["target"]
     cell_ids = {(c["ticker"], c["metric"], c["year"]): c["metric_id"] for c in comp["cells"]}
+    cell_ids.update({(c["ticker"], c["metric"], c["period_type"]): c["metric_id"] for c in comp.get("recent_cells", [])})
+    stale = set(comp.get("stale", []))
     cache: dict[str, tuple[float | None, list[str]]] = {}
 
     def rc(mid: str) -> tuple[float | None, list[str]]:
         if mid not in cache:
-            cache[mid] = recompute(mid)
+            cache[mid] = recompute_recent(mid) if (":TTM:" in mid or ":Q:" in mid) else recompute(mid)
         return cache[mid]
 
-    def median_of(metric: str, year: int) -> float | None:
-        vals = [rc(cell_ids[(t, metric, year)])[0] for t in comp["tickers"][1:] if (t, metric, year) in cell_ids]  # 대상 제외
+    def median_of(metric: str, period) -> float | None:
+        vals = [rc(cell_ids[(t, metric, period)])[0] for t in comp["tickers"][1:]
+                if (t, metric, period) in cell_ids and not (isinstance(period, str) and t in stale)]  # 대상·오래된 데이터 제외
         vals = [v for v in vals if v is not None]
         return statistics.median(vals) if vals else None
 
@@ -119,24 +174,58 @@ def check_numbers(result: dict[str, Any]) -> dict[str, Any]:
                 if seg["type"] != "metric":
                     continue
                 total += 1
-                kind, metric, year = seg["ref_id"].split(".")
-                year = int(year)
-                if kind == "PEER":
-                    expect = median_of(metric, year)
+                kind, metric, period = seg["ref_id"].split(".")
+                period = int(period) if period.isdigit() else period
+                scale = period == "SCALE"
+                if kind == "RANK":  # 최근 12개월 순위: 오래된 데이터 제외, 높을수록 1위
+                    vals = {t: rc(cell_ids[(t, metric, "TTM")])[0] for t in comp["tickers"]
+                            if (t, metric, "TTM") in cell_ids and t not in stale}
+                    vals = {t: v for t, v in vals.items() if v is not None}
+                    mine = vals.get(target)
+                    rank = None if mine is None else 1 + sum(1 for v in vals.values() if v > mine)
+                    shown = _shown(seg["text"])
+                    if rank is not None and shown == rank:
+                        ok += 1
+                    else:
+                        errors.append(f"{seg['ref_id']}: 표시 {seg['text']} / 재계산 {rank}위")
+                    continue
+                if period == "CHG":  # 대상 기업 연간 변화폭
+                    y0, y1 = comp["years"][0], comp["years"][-1]
+                    a, b = cell_ids.get((kind, metric, y0)), cell_ids.get((kind, metric, y1))
+                    va, vb = (rc(a)[0] if a else None), (rc(b)[0] if b else None)
+                    expect = None if va is None or vb is None else vb - va
+                    shown = _shown(seg["text"])
+                    if expect is not None and shown is not None and abs(round(expect * 100, 1) - shown) < 0.051:
+                        ok += 1
+                    else:
+                        errors.append(f"{seg['ref_id']}: 표시 {seg['text']} / 재계산 {expect}")
+                    continue
+                if scale:
+                    sc = comp["recent_periods"][kind]["scale"]
+                    expect, probs = _sum_terms(sc["terms"])
+                    if probs:
+                        errors.append(f"{seg['ref_id']}: {'; '.join(probs)}")
+                elif kind == "PEER":
+                    expect = median_of(metric, period)
                 elif kind == "DIFF":
-                    tid = cell_ids.get((target, metric, year))
-                    t, med = (rc(tid)[0] if tid else None), median_of(metric, year)
+                    tid = cell_ids.get((target, metric, period))
+                    t, med = (rc(tid)[0] if tid else None), median_of(metric, period)
                     expect = None if t is None or med is None else t - med
                 else:
-                    mid = cell_ids.get((kind, metric, year))
+                    mid = cell_ids.get((kind, metric, period))
                     expect, probs = rc(mid) if mid else (None, ["비교표에 없는 참조"])
                     if probs:
                         errors.append(f"{seg['ref_id']}: {'; '.join(probs)}")
                 shown = _shown(seg["text"])
-                if expect is not None and shown is not None and abs(round(expect * 100, 1) - shown) < 0.051:
+                if scale:
+                    good = expect is not None and shown is not None and abs(round(expect / 1e9, 1) - shown) < 0.051
+                else:
+                    good = expect is not None and shown is not None and abs(round(expect * 100, 1) - shown) < 0.051
+                if good:
                     ok += 1
                 else:
-                    errors.append(f"{seg['ref_id']}: 표시 {seg['text']} / 재계산 {None if expect is None else round(expect * 100, 2)}")
+                    shown_expect = None if expect is None else (round(expect / 1e9, 2) if scale else round(expect * 100, 2))
+                    errors.append(f"{seg['ref_id']}: 표시 {seg['text']} / 재계산 {shown_expect}")
     stray = [n for b in result["memo"]["blocks"] for s in b["sentences"] for n in stray_numbers(s["text"])]
     return {"numbers_total": total, "numbers_ok": ok, "number_errors": errors, "stray_numbers": len(stray), "stray_examples": stray[:5]}
 
@@ -176,7 +265,7 @@ def check_citations(result: dict[str, Any]) -> dict[str, Any]:
 
 def independent_judge(result: dict[str, Any], llm: LLM) -> dict[str, Any]:
     ev = {e["ref_id"]: e for e in result["memo"]["evidence"]}
-    quals = [s for b in result["memo"]["blocks"] for s in b["sentences"] if s["kind"] == "qual" and s["evidence_ids"]]
+    quals = [s for b in result["memo"]["blocks"] for s in b["sentences"] if s["evidence_ids"]]  # 근거가 달린 모든 문장
     if not quals:
         return {"judge_total": 0, "judge_supported": 0, "judge_details": []}
     parts = []
@@ -192,6 +281,77 @@ def independent_judge(result: dict[str, Any], llm: LLM) -> dict[str, Any]:
         "judge_supported": sum(1 for j in judged.items if j.verdict == "supported"),
         "judge_partial": sum(1 for j in judged.items if j.verdict == "partial"),
         "judge_details": [d for d in details if d["verdict"] != "supported"],
+    }
+
+
+# ---- 메모 품질 (분석 깊이 등) ----------------------------------------------------------------
+
+from difflib import SequenceMatcher  # noqa: E402
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+QUALITY_CRITERIA = {
+    "insight": "분석 깊이 — 수치 나열이 아니라 해석·원인·시사점을 제시하는가",
+    "linkage": "수치-근거 연결 — 정량 결과의 원인을 공시 근거와 연결해 설명하는가",
+    "recency": "최신성 — 최근 12개월·최근 분기 기준을 쓰고 기간을 명확히 밝히는가",
+    "comparison": "Peer 대비 — 대상 기업만이 아니라 Peer의 수치·공시와 실제로 비교·대조하는가",
+    "relevance": "요청 충실도 — 요청한 관심사를 중심으로 구성했는가",
+    "concision": "간결성 — 같은 틀의 문장 반복·중복 없이 읽히는가",
+    "actionability": "투자 검토 유용성 — 검토 포인트가 구체적이고 다음에 확인할 것을 알려 주는가",
+}
+
+
+class QualityScore(BaseModel):
+    criterion: str
+    score: int = Field(description="1(매우 부족)~5(전문 애널리스트 수준)")
+    reason: str = Field(description="한 문장 근거 (한국어)")
+
+
+class QualityReport(BaseModel):
+    scores: list[QualityScore]
+    best: str = Field(description="가장 좋은 점 한 문장")
+    worst: str = Field(description="가장 아쉬운 점 한 문장")
+
+
+QUALITY_SYSTEM = (
+    "너는 국부펀드 해외주식 리서치팀장이다. 주니어가 쓴 Peer 비교 투자 검토 메모를 아래 기준별로 1~5점 채점한다. "
+    "5점은 바로 투자위원회 자료로 쓸 수 있는 수준, 3점은 사실은 맞지만 해석이 얕은 수준, 1점은 쓸모없는 수준. 후하게 주지 마라.\n"
+    + "\n".join(f"- {k}: {v}" for k, v in QUALITY_CRITERIA.items())
+)
+
+
+def _memo_text(result: dict[str, Any]) -> str:
+    lines = [result["memo"]["title"]]
+    for b in result["memo"]["blocks"]:
+        lines.append(f"\n[{b['heading']}]")
+        for s in b["sentences"]:
+            cite = f" ({', '.join(s['evidence_ids'])})" if s["evidence_ids"] else ""
+            lines.append(f"- {''.join(seg['text'] for seg in s['segments'])}{cite}")
+    return "\n".join(lines)
+
+
+def repetition_ratio(result: dict[str, Any]) -> float:
+    """수치 문장 중 다른 수치 문장과 골격(숫자 제거)이 80% 이상 같은 문장의 비율."""
+    sk = [re.sub(r"[\d.,+−%$B()]+|CY\d{4}|FY\d{4}", "#", "".join(g["text"] for g in s["segments"]))
+          for b in result["memo"]["blocks"] for s in b["sentences"] if s["kind"] == "quant"]
+    if len(sk) < 2:
+        return 0.0
+    dup = sum(1 for i, a in enumerate(sk) if any(SequenceMatcher(None, a, b).ratio() >= 0.8 for j, b in enumerate(sk) if i != j))
+    return dup / len(sk)
+
+
+def memo_quality(q: dict[str, Any], result: dict[str, Any], llm: LLM) -> dict[str, Any]:
+    user = f"요청: {q['request']}\n\n메모:\n{_memo_text(result)}"
+    rep, _ = llm.parse(QualityReport, system=QUALITY_SYSTEM, user=user, name="quality_judge", fast=False)
+    scores = {x.criterion: x.score for x in rep.scores if x.criterion in QUALITY_CRITERIA}
+    text = _memo_text(result)
+    return {
+        "quality": scores,
+        "quality_avg": round(sum(scores.values()) / len(scores), 2) if scores else None,
+        "quality_best": rep.best,
+        "quality_worst": rep.worst,
+        "repetition": round(repetition_ratio(result), 2),
+        "mentions_recent": any(k in text for k in ("최근 12개월", "TTM", "최근 분기", "전년 동기")),
     }
 
 
@@ -227,6 +387,7 @@ def score(q: dict[str, Any], result: dict[str, Any], llm: LLM) -> dict[str, Any]
         "sentences": st["sentences"], "revisions": st["revisions"], "warnings": st["warnings"],
         "agent_qual_supported": st["qual_supported"], "agent_qual": st["qual"],
         **check_numbers(result), **check_citations(result), **independent_judge(result, llm), **check_request(q, result),
+        **memo_quality(q, result, llm),
     })
     row["success"] = st["sentences"] >= 10 and row["target_ok"]
     return row
@@ -268,14 +429,24 @@ def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str]) -> No
         f"| 최종 경고 문장 | {s('warnings')}개 | 재작성 후에도 검증 실패 |",
         f"| LLM 사용량 | 질문당 평균 {s('llm_calls') / max(len(done), 1):.1f}회, 입력 {s('tokens_in') / max(len(done), 1):,.0f} / 출력 {s('tokens_out') / max(len(done), 1):,.0f} 토큰 | |",
         "",
+        "## 메모 품질 (독립 모델 채점, 1~5점)",
+        "",
+        "| 항목 | 평균 | 기준 |",
+        "|---|---|---|",
+        *([f"| {k} | {statistics.mean([r['quality'].get(k, 0) for r in done if r.get('quality')]):.2f} | {v} |"
+           for k, v in QUALITY_CRITERIA.items()] if any(r.get("quality") for r in done) else []),
+        f"| **종합** | **{statistics.mean([r['quality_avg'] for r in done if r.get('quality_avg')]):.2f}** | 7개 항목 평균 |" if any(r.get("quality_avg") for r in done) else "",
+        f"| 반복 문장 비율 | {statistics.mean([r.get('repetition', 0) for r in done]) * 100:.0f}% | 수치 문장 중 같은 틀(골격 80% 이상 일치) 비율 — 낮을수록 좋음 |" if done else "",
+        f"| 최근 기간 언급 | {sum(1 for r in done if r.get('mentions_recent'))}/{len(done)} | 최근 12개월·최근 분기·전년 동기 언급 |" if done else "",
+        "",
         "## 질문별 결과",
         "",
-        "| ID | 대상 | Peer | 시간 | 문장 | 수치 | 인용 존재 | 근거(독립) | 재작성 | 비고 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| ID | 대상 | Peer | 시간 | 문장 | 수치 | 인용 존재 | 근거(독립) | 재작성 | 품질 | 비고 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         if r["status"] != "ok":
-            lines.append(f"| {r['id']} | – | – | {r['elapsed_s']}초 | – | – | – | – | – | 실패: {r.get('error', '')[:80]} |")
+            lines.append(f"| {r['id']} | – | – | {r['elapsed_s']}초 | – | – | – | – | – | – | 실패: {r.get('error', '')[:80]} |")
             continue
         note = []
         if r["mentions_missing"]:
@@ -287,12 +458,15 @@ def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str]) -> No
         lines.append(
             f"| {r['id']} | {r['target']} | {', '.join(r['peers'])} | {r['elapsed_s']:.0f}초 | {r['sentences']} | "
             f"{r['numbers_ok']}/{r['numbers_total']} | {r['citations_found']}/{r['citations']} | {r['judge_supported']}/{r['judge_total']} | "
-            f"{r['revisions']} | {'; '.join(note) or '–'} |"
+            f"{r['revisions']} | {r.get('quality_avg', '–')} | {'; '.join(note) or '–'} |"
         )
     issues = [(r["id"], d) for r in done for d in r.get("judge_details", [])]
     if issues:
         lines += ["", "## 독립 재판정에서 지적된 문장", ""]
         lines += [f"- {qid} {d['sentence_id']} ({d['verdict']}): {d['reason']}" for qid, d in issues]
+    worst = [(r["id"], r.get("quality_worst")) for r in done if r.get("quality_worst")]
+    if worst:
+        lines += ["", "## 품질 채점에서 지적된 가장 아쉬운 점", ""] + [f"- {qid}: {w}" for qid, w in worst]
     errs = [(r["id"], e) for r in done for e in r.get("number_errors", [])]
     if errs:
         lines += ["", "## 수치 불일치", ""] + [f"- {qid}: {e}" for qid, e in errs]

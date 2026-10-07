@@ -10,6 +10,8 @@ const EXAMPLES = [
   "퀄컴을 Peer와 비교해서 스마트폰 의존도와 수익성 관점의 메모를 써줘",
 ];
 
+const INSIGHT_LABEL = { strength: "강점", weakness: "약점", driver: "동인", risk: "리스크", watch: "확인" } as const;
+
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="stat">
@@ -132,6 +134,38 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
                   <Stat label="인용" value={`${memo.stats.evidence_used}건`} sub={`수치 참조 ${memo.stats.metric_refs_used}개`} />
                 </section>
                 {result.notes && result.notes.length > 0 && <div className="notice">ⓘ {result.notes.join(" · ")}</div>}
+                {result.analysis && (
+                  <details className="card analysis">
+                    <summary>
+                      <b>분석 설계</b> <span className="card-note">메모를 쓰기 전 Agent가 정리한 논지·인사이트 (수치는 코드 계산값, 근거는 공시 인용)</span>
+                    </summary>
+                    <div className="card-body">
+                      <p className="thesis">{result.analysis.thesis}</p>
+                      <ul className="insights">
+                        {result.analysis.insights.map((x, i) => (
+                          <li key={i}>
+                            <span className={`itype it-${x.type}`}>{INSIGHT_LABEL[x.type]}</span>
+                            <span>
+                              {x.claim}
+                              {x.evidence_ids.length > 0 && <span className="card-note"> · 근거 {x.evidence_ids.join(", ")}</span>}
+                              <span className="so-what">→ {x.so_what}</span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="analysis-cols">
+                        <div>
+                          <h4>Peer 대비</h4>
+                          <ul>{result.analysis.peer_contrasts.map((x, i) => <li key={i}>{x}</li>)}</ul>
+                        </div>
+                        <div>
+                          <h4>다음에 확인할 것</h4>
+                          <ul>{result.analysis.watch_items.map((x, i) => <li key={i}>{x}</li>)}</ul>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+                )}
                 <section className="card">
                   <div className="card-body">
                     <MemoView memo={memo} onMetric={onOpenMetric} onEvidence={setEvidenceId} />

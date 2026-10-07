@@ -54,7 +54,7 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
-button, input, select { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--accent-ink); }
 .num { font-variant-numeric: tabular-nums; }
 

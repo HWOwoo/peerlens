@@ -32,6 +32,10 @@ SECTION_LABEL_KO = {
 
 _BLOCK_TAGS = {"p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "table", "section", "body", "ul", "ol"}
 _HEADING_RE = re.compile(r"^\s*item\s+(\d{1,2}[a-d]?)\s*[.:\-—–]?\s*(.{0,200})$", re.IGNORECASE)
+# 페이지 머리말: "PART II", "PART II, III", "Item 7", "Item 9B, 9C, 10, 11"
+_RUNNING_HEADER_RE = re.compile(
+    r"^(part\s+[ivx]+(\s*,\s*[ivx]+)*|item\s+\d{1,2}[a-d]?(\s*,\s*\d{1,2}[a-d]?)*)$", re.IGNORECASE
+)
 _NOISE_RE = re.compile(r"^(table of contents|\d{1,3}|page \d+|[ivx]{1,5})$", re.IGNORECASE)
 
 
@@ -207,10 +211,11 @@ def split_sections(blocks: list[Block], form: str) -> dict[str, Section]:
         if m:
             heads.append((i, m.group(1).upper(), m.group(2).strip(" .")))
 
-    # 각 제목에서 다음 제목까지의 글자 수
+    # 각 제목에서 '번호가 다른' 다음 제목까지의 글자 수.
+    # MSFT처럼 페이지마다 "PART I / Item 1" 머리말이 반복되는 문서에서 섹션이 페이지 단위로 잘리지 않게 한다.
     spans: list[tuple[int, int, str, str, int]] = []
     for n, (i, item, title) in enumerate(heads):
-        end = heads[n + 1][0] if n + 1 < len(heads) else len(blocks)
+        end = next((h[0] for h in heads[n + 1 :] if h[1] != item), len(blocks))
         size = sum(len(b.text) for b in blocks[i + 1 : end])
         spans.append((i, end, item, title, size))
 
@@ -224,7 +229,8 @@ def split_sections(blocks: list[Block], form: str) -> dict[str, Section]:
             continue
         if not title:  # 제목이 다음 블록에 따로 있는 경우
             title = blocks[i + 1].text if i + 1 < len(blocks) and len(blocks[i + 1].text) < 150 else ""
-        sections[key] = Section(key=key, item=item, title=title, blocks=blocks[i + 1 : end])
+        body = [b for b in blocks[i + 1 : end] if not _RUNNING_HEADER_RE.match(b.text)]
+        sections[key] = Section(key=key, item=item, title=title, blocks=body)
 
     if len(sections) < len(mapping):
         for key, sec in _split_by_toc(blocks).items():

@@ -29,16 +29,22 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
   const [evidenceId, setEvidenceId] = useState<string | null>(null);
   const cancel = useRef<(() => void) | null>(null);
 
-  // 최근 실행 결과가 있으면 불러와 바로 보여준다 (데모 첫 화면)
+  // ?run=실행ID 가 있으면 그 결과를, 없으면 최근 성공 결과를 불러와 바로 보여준다 (데모 첫 화면·공유 링크)
   useEffect(() => {
-    api.agentRuns().then((runs) => {
-      const ok = runs.find((r) => r.status === "ok");
-      if (ok) api.agentRun(ok.run_id).then((r) => {
+    const show = (id: string) =>
+      api.agentRun(id).then((r) => {
         setResult(r);
         setEvents(r.trace);
         setQ(r.request);
       });
-    }).catch(() => undefined);
+    const fromUrl = new URLSearchParams(window.location.search).get("run");
+    (fromUrl
+      ? show(fromUrl)
+      : api.agentRuns().then((runs) => {
+          const ok = runs.find((r) => r.status === "ok");
+          if (ok) return show(ok.run_id);
+        })
+    ).catch(() => undefined);
     return () => cancel.current?.();
   }, []);
 

@@ -69,11 +69,13 @@ def _is_subheading(b: Block) -> bool:
 
 
 def _is_numeric_row(b: Block) -> bool:
-    """재무표 행은 제외 — 수치는 XBRL에서만 가져온다 (원칙 1)."""
+    """표 행은 문장형(마침표로 끝나는 긴 글)만 남긴다. 재무표·표 머리글은 제외 — 수치는 XBRL에서만 (원칙 1).
+    문장형 표 행은 일부 공시가 글머리표 목록을 표로 배치한 경우다."""
     if not b.in_table:
         return False
+    sentence_like = len(b.text) >= 60 and len(b.text.split()) >= 8 and b.text.rstrip().endswith((".", ";", ":"))
     letters = sum(ch.isalpha() for ch in b.text)
-    return letters < len(b.text) * 0.5 or len(b.text) < 40
+    return not sentence_like or letters < len(b.text) * 0.5
 
 
 def anchor_url(source_url: str, text: str, words: int = 8) -> str:

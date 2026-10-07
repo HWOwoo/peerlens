@@ -54,6 +54,19 @@ def test_toc_fallback_for_annual_report_style():
     assert LOREM.strip() in md and "Risk Factors" not in md  # MD&A는 위험요인 시작에서 끝
 
 
+def test_repeated_page_headers_do_not_cut_sections():
+    """MSFT 10-K처럼 페이지마다 'PART I / Item 1A' 머리말이 반복돼도 섹션 전체를 잡아야 한다."""
+    blocks = [Block("Item 1A. Risk Factors 14", in_table=True), Block("Item 7. MD&A 33", in_table=True)]
+    blocks += [Block("ITEM 1A. RISK FACTORS"), Block(LOREM)]
+    for _ in range(3):
+        blocks += [Block("PART I"), Block("Item 1A"), Block(LOREM)]
+    blocks += [Block("PART II"), Block("Item 7"), Block("ITEM 7. MANAGEMENT'S DISCUSSION"), Block(LOREM)]
+    secs = split_sections(blocks, "10-K")
+    rf = secs["risk_factors"]
+    assert sum(1 for b in rf.blocks if b.text == LOREM) == 4
+    assert not any(b.text in ("PART I", "Item 1A", "PART II", "Item 7") for b in rf.blocks)
+
+
 def test_reflow_joins_pdf_style_lines():
     line = "x" * 100
     blocks = [Block(f"{line} word{i} and more text to fill the line here ok") for i in range(60)]

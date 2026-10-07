@@ -17,6 +17,28 @@ export type Cell = {
 
 export type PeerStat = { metric: string; year: number; n: number; median: number | null; formula: string };
 
+export type RecentCell = {
+  ticker: string;
+  metric: string;
+  period_type: "TTM" | "Q";
+  value: number | null;
+  metric_id: string;
+  period_end: string;
+  period_label: string;
+  flags: string[];
+  stale: boolean;
+};
+
+export type RecentStat = { metric: string; period_type: "TTM" | "Q"; n: number; median: number | null; formula: string };
+
+export type RecentPeriod = {
+  ttm: string | null;
+  ttm_end: string | null;
+  q: string | null;
+  q_end: string | null;
+  scale: { value: number; unit: string; label: string } | null;
+};
+
 export type Comparison = {
   target: string;
   tickers: string[];
@@ -29,6 +51,10 @@ export type Comparison = {
   cells: Cell[];
   peer_median: PeerStat[];
   missing_latest: string[];
+  recent_cells?: RecentCell[];
+  recent_median?: RecentStat[];
+  recent_periods?: Record<string, RecentPeriod>;
+  stale?: string[];
 };
 
 export type Fact = {
@@ -55,6 +81,7 @@ export type Fact = {
   retrieved_at: string;
   restated: boolean;
   original_value: number | null;
+  annual?: boolean;
 };
 
 export type MetricDetail = {
@@ -69,6 +96,9 @@ export type MetricDetail = {
   formula: string;
   inputs: string[];
   flags: string[];
+  period_type?: "FY" | "TTM" | "Q";
+  period_label?: string;
+  explain?: string | null;
   input_facts: Fact[];
 };
 
@@ -176,6 +206,12 @@ export type AgentResult = {
   comparison?: Comparison;
   notes?: string[];
   memo?: AgentMemo;
+  analysis?: {
+    thesis: string;
+    insights: { type: "strength" | "weakness" | "driver" | "risk" | "watch"; claim: string; metric_refs: string[]; evidence_ids: string[]; so_what: string }[];
+    peer_contrasts: string[];
+    watch_items: string[];
+  } | null;
   elapsed_ms: number;
   llm_usage: { calls: number; input_tokens: number; output_tokens: number };
   models: { main: string; fast: string };

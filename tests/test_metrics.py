@@ -48,7 +48,11 @@ def test_period_filter_restatement_and_tag_fallback():
             row(70.0, "2024-07-29", "2024-10-27", filed="2024-11-20", form="10-Q", fp="Q3"),
         ]},
     })
-    facts = {f.fiscal_year: f for f in extract_facts(cf, ticker="T", concepts=["revenue"])}
+    all_facts = extract_facts(cf, ticker="T", concepts=["revenue"])
+    facts = {f.fiscal_year: f for f in all_facts if f.annual}
+    interim = [f for f in all_facts if not f.annual]
+    assert [f.form for f in interim] == ["10-Q"] and interim[0].fact_id == "T:revenue:2024-07-29~2024-10-27"
+    assert interim[0].fiscal_year == 2025  # 2025-01-26에 끝나는 회계연도의 3분기
     assert sorted(facts) == [2023, 2024, 2025]
     assert facts[2023].tag == "SalesRevenueNet"
     assert facts[2024].value == 210.0 and facts[2024].restated and facts[2024].original_value == 200.0

@@ -14,6 +14,13 @@ function substitute(formula: string, d: MetricDetail): string {
   });
 }
 
+function periodName(f: Fact) {
+  const days = (Date.parse(f.period_end) - Date.parse(f.period_start!)) / 86400000;
+  if (days > 340) return "연간";
+  if (days < 100) return "3개월";
+  return `${Math.round(days / 30.4)}개월 누적`;
+}
+
 function FactCard({ f, current }: { f: Fact; current: string }) {
   const period = f.period_start ? `${f.period_start} ~ ${f.period_end}` : `${f.period_end} 시점`;
   return (
@@ -21,13 +28,14 @@ function FactCard({ f, current }: { f: Fact; current: string }) {
       <div className="fact-top">
         <span>
           {conceptKo(f.concept)}
-          {f.period_end !== current && <span className="card-note"> (전년)</span>}
+          {f.period_start && <span className="card-note"> · {periodName(f)}</span>}
+          {!f.period_start && f.period_end !== current && <span className="card-note"> (전년)</span>}
         </span>
         <span className="num">{money(f.value, f.unit)}</span>
       </div>
       <dl>
         <dt>회계기간</dt>
-        <dd>FY{f.fiscal_year} · {period}</dd>
+        <dd>FY{f.fiscal_year}{f.annual === false ? " 분기 공시" : ""} · {period}</dd>
         <dt>XBRL 태그</dt>
         <dd>{f.taxonomy}:{f.tag}{!f.exact_tag && " (대체 태그)"}</dd>
         <dt>공시</dt>
@@ -75,7 +83,7 @@ export function ProvenancePanel({ metricId, companyName, onClose }: { metricId: 
         {d && (
           <>
             <h2>
-              {d.ticker}{companyName ? ` · ${companyName}` : ""} · FY{d.fiscal_year} (기간 종료 {d.period_end})
+              {d.ticker}{companyName ? ` · ${companyName}` : ""} · {d.period_type && d.period_type !== "FY" ? d.period_label : `FY${d.fiscal_year}`} (기간 종료 {d.period_end})
             </h2>
             <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
               <span style={{ fontSize: 16, fontWeight: 650 }}>{d.label_ko}</span>
@@ -86,8 +94,14 @@ export function ProvenancePanel({ metricId, companyName, onClose }: { metricId: 
               <h3>계산식 — 수치는 모두 코드로 계산 (LLM 생성 아님)</h3>
               <div className="formula">
                 {d.formula}
-                <br />= {substitute(d.formula, d)}
+                <br />= {d.explain ?? substitute(d.formula, d)}
                 <br />= {pct(d.value, 2)}
+                {d.period_type === "TTM" && (
+                  <>
+                    <br />
+                    <span className="card-note">최근 12개월(TTM) = 최근 연간 + 올해 누적 − 작년 같은 기간 누적</span>
+                  </>
+                )}
               </div>
             </section>
 

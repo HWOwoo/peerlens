@@ -48,6 +48,10 @@ class MetricValue:
     formula: str
     inputs: list[str]
     flags: list[str] = field(default_factory=list)
+    period_type: str = "FY"  # FY(연간) | TTM(최근 12개월) | Q(최근 분기)
+    period_label: str = ""
+    explain: str | None = None  # 실제 값을 대입한 계산식 (TTM·분기)
+    components: dict | None = None  # 항목별 [부호, fact_id] 목록 — 평가 시 원본에서 독립 재계산용
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -110,7 +114,8 @@ def _ratio(num: Fact | None, den: Fact | None) -> float | None:
 def compute_metrics(facts: Iterable[Fact]) -> list[MetricValue]:
     by_ticker: dict[str, list[Fact]] = {}
     for f in facts:
-        by_ticker.setdefault(f.ticker, []).append(f)
+        if f.annual:  # 연간 지표는 연간 공시 값만 (분기 값은 metrics/recent.py)
+            by_ticker.setdefault(f.ticker, []).append(f)
 
     out: list[MetricValue] = []
     for ticker, flist in by_ticker.items():

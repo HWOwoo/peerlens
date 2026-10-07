@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from peerlens.edgar.client import EdgarClient
-from peerlens.edgar.filings import FilingRef, fetch_filing_html, html_to_blocks, latest_annual_filing, split_sections
+from peerlens.edgar.filings import (
+    FilingRef,
+    fetch_filing_html,
+    html_to_blocks,
+    latest_annual_filing,
+    latest_quarterly_filing,
+    split_sections,
+)
 from peerlens.retrieval.chunking import Chunk, chunk_section
 from peerlens.retrieval.index import FilingIndex
 
@@ -20,11 +27,18 @@ class IndexReport:
     error: str | None = None
 
 
-def build_chunks(client: EdgarClient, ticker: str) -> tuple[FilingRef, list[Chunk]]:
-    ref = latest_annual_filing(client, ticker)
+def _filing_chunks(client: EdgarClient, ref: FilingRef) -> list[Chunk]:
     html, retrieved_at = fetch_filing_html(client, ref)
     sections = split_sections(html_to_blocks(html), ref.form)
-    chunks = [c for sec in sections.values() for c in chunk_section(ref, sec, retrieved_at)]
+    return [c for sec in sections.values() for c in chunk_section(ref, sec, retrieved_at)]
+
+
+def build_chunks(client: EdgarClient, ticker: str, *, quarterly: bool = True) -> tuple[FilingRef, list[Chunk]]:
+    """최신 연간 공시 + (있으면) 그 이후의 최신 10-Q. 반환 ref는 연간 공시."""
+    ref = latest_annual_filing(client, ticker)
+    chunks = _filing_chunks(client, ref)
+    if quarterly and (q := latest_quarterly_filing(client, ticker)) is not None:
+        chunks += _filing_chunks(client, q)
     return ref, chunks
 
 
@@ -38,7 +52,8 @@ def index_tickers(index: FilingIndex, client: EdgarClient, tickers: list[str]) -
             continue
         by_sec: dict[str, int] = {}
         for c in chunks:
-            by_sec[c.section] = by_sec.get(c.section, 0) + 1
+            key = c.section if c.form != "10-Q" else f"10-Q {c.section}"
+            by_sec[key] = by_sec.get(key, 0) + 1
         if not chunks:
             reports.append(IndexReport(t.upper(), ref, by_sec, error="섹션을 찾지 못함 (비표준 공시 형식)"))
             continue

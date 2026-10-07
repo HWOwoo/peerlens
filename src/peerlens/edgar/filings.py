@@ -22,6 +22,9 @@ ARCHIVE_DOC_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accn_nodash}/{
 SECTION_MAP: dict[str, dict[str, str]] = {
     "10-K": {"1": "business", "1A": "risk_factors", "7": "mdna", "7A": "market_risk"},
     "20-F": {"4": "business", "3": "risk_factors", "5": "mdna", "11": "market_risk"},
+    # 분기보고서: Part I Item 2 = MD&A, Item 3 = 시장위험, Part II Item 1A = 위험요인 변경 사항
+    # (Part II의 Item 2는 자사주 매입 등 짧은 항목이라 '가장 긴 구간' 규칙으로 Part I MD&A가 선택된다)
+    "10-Q": {"2": "mdna", "1A": "risk_factors", "3": "market_risk"},
 }
 SECTION_LABEL_KO = {
     "business": "사업 개요",
@@ -90,6 +93,16 @@ def latest_annual_filing(client: EdgarClient, ticker: str, forms: tuple[str, ...
                 primary_doc=rec["primaryDocument"][i],
             )
     raise LookupError(f"{ticker}: no {'/'.join(forms)} in recent filings")
+
+
+def latest_quarterly_filing(client: EdgarClient, ticker: str) -> FilingRef | None:
+    """최신 10-Q. 최신 연간 공시보다 나중에 낸 것만 (연간 공시 직후엔 없음)."""
+    try:
+        annual = latest_annual_filing(client, ticker)
+        q = latest_annual_filing(client, ticker, forms=("10-Q",))
+    except LookupError:
+        return None
+    return q if q.filed > annual.filed else None
 
 
 def fetch_filing_html(client: EdgarClient, ref: FilingRef) -> tuple[str, str]:
@@ -200,7 +213,7 @@ def _join(lines: list[str]) -> str:
 
 
 def split_sections(blocks: list[Block], form: str) -> dict[str, Section]:
-    base_form = "20-F" if form.startswith("20-F") else "10-K"
+    base_form = "20-F" if form.startswith("20-F") else "10-Q" if form.startswith("10-Q") else "10-K"
     mapping = SECTION_MAP[base_form]
 
     heads: list[tuple[int, str, str]] = []  # (block index, item, title)
@@ -234,7 +247,8 @@ def split_sections(blocks: list[Block], form: str) -> dict[str, Section]:
 
     if len(sections) < len(mapping):
         for key, sec in _split_by_toc(blocks).items():
-            sections.setdefault(key, sec)
+            if key in mapping.values():  # 10-Q에는 '사업 개요'가 없다
+                sections.setdefault(key, sec)
     return sections
 
 
@@ -250,7 +264,10 @@ _TITLE_PATTERNS: dict[str, list[str]] = {
 
 
 def _key(s: str) -> str:
-    return _norm(s).lower().replace("’", "'")
+    """제목 비교용 정규화. "MD&A Management's…", "Management's… (MD&A)" 같은 표기 차이를 없앤다."""
+    k = _norm(s).lower().replace("’", "'")
+    k = re.sub(r"^md&a\s+|\s*\(md&a\)$", "", k)
+    return k
 
 
 def _toc_entries(blocks: list[Block]) -> tuple[list[tuple[str, bool]], int]:

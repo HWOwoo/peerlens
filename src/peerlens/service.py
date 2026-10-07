@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import statistics
+from datetime import date
 import threading
 from functools import lru_cache
 from typing import Any
@@ -11,6 +12,7 @@ from peerlens.edgar.client import EdgarClient
 from peerlens.metrics.calc import METRICS, Align, MetricValue, compute_metrics, latest_reported_year, metrics_frame, table_year_col
 from peerlens.metrics.facts import Fact
 from peerlens.metrics.pipeline import load_facts
+from peerlens.metrics.recent import compute_recent_metrics, recent_scale
 
 _client: EdgarClient | None = None
 _client_lock = threading.Lock()
@@ -31,7 +33,12 @@ def company_facts(ticker: str) -> tuple[Fact, ...]:
 
 @lru_cache(maxsize=256)
 def company_metrics(ticker: str) -> tuple[MetricValue, ...]:
-    return tuple(compute_metrics(company_facts(ticker)))
+    """연간(FY) + 최근 12개월(TTM) + 최근 분기(Q) 지표."""
+    facts = list(company_facts(ticker))
+    return tuple(compute_metrics(facts)) + tuple(compute_recent_metrics(facts))
+
+
+STALE_DAYS = 200  # 다른 회사 최신 기준일보다 이만큼 오래되면 '오래된 데이터'로 보고 중앙값에서 뺀다
 
 
 def search_companies(query: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -68,7 +75,8 @@ def compare(target: str, peers: list[str], *, years: int = 3, align: Align = "ca
     target = target.upper()
     tickers = [target] + [p.upper() for p in peers if p.upper() != target]
     tickers = list(dict.fromkeys(tickers))
-    metrics = [m for t in tickers for m in company_metrics(t)]
+    all_metrics = [m for t in tickers for m in company_metrics(t)]
+    metrics = [m for m in all_metrics if m.period_type == "FY"]
 
     year_col = table_year_col(align)
     df = metrics_frame(metrics)
@@ -102,6 +110,7 @@ def compare(target: str, peers: list[str], *, years: int = 3, align: Align = "ca
             })
 
     missing = [t for t in tickers if (t, "gross_margin", latest) not in cell]
+    recent = _recent_block(tickers, all_metrics)
     return {
         "target": target,
         "tickers": tickers,
@@ -114,7 +123,32 @@ def compare(target: str, peers: list[str], *, years: int = 3, align: Align = "ca
         "cells": cells,
         "peer_median": peer_stats,
         "missing_latest": missing,
+        **recent,
     }
+
+
+def _recent_block(tickers: list[str], metrics: list[MetricValue]) -> dict[str, Any]:
+    """최근 12개월(TTM)·최근 분기(Q) 셀과 Peer 중앙값. 기준일이 회사마다 달라 회사별 기간 라벨을 함께 준다."""
+    recent = [m for m in metrics if m.period_type in ("TTM", "Q")]
+    ends = {(m.ticker, m.period_type): (m.period_end, m.period_label) for m in recent}
+    newest = max((e for (_, k), (e, _) in ends.items() if k == "TTM"), default=None)
+    stale = sorted({t for (t, k), (e, _) in ends.items()
+                    if k == "TTM" and newest and (date.fromisoformat(newest) - date.fromisoformat(e)).days > STALE_DAYS})
+    cells = [{
+        "ticker": m.ticker, "metric": m.metric, "period_type": m.period_type, "value": m.value, "metric_id": m.metric_id,
+        "period_end": m.period_end, "period_label": m.period_label, "flags": m.flags, "stale": m.ticker in stale,
+    } for m in recent]
+    medians = []
+    for pt in ("TTM", "Q"):
+        for name in METRICS:
+            vals = [c["value"] for c in cells if c["period_type"] == pt and c["metric"] == name and c["ticker"] != tickers[0]
+                    and c["value"] is not None and not c["stale"]]
+            medians.append({"metric": name, "period_type": pt, "n": len(vals), "median": statistics.median(vals) if vals else None,
+                            "formula": f"median({name} {pt} of peers, n={len(vals)}, 오래된 데이터 제외)"})
+    periods = {t: {"ttm": ends.get((t, "TTM"), (None, None))[1], "ttm_end": ends.get((t, "TTM"), (None, None))[0],
+                   "q": ends.get((t, "Q"), (None, None))[1], "q_end": ends.get((t, "Q"), (None, None))[0],
+                   "scale": recent_scale(list(company_facts(t)))} for t in tickers}
+    return {"recent_cells": cells, "recent_median": medians, "recent_periods": periods, "stale": stale}
 
 
 _index = None

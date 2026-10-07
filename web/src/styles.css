@@ -312,3 +312,20 @@ footer { color: var(--text-muted); font-size: 12px; text-align: center; padding:
   .tabs { margin-left: 0; }
   .topbar { flex-wrap: wrap; }
 }
+.cmp thead th .co.stale { color: var(--warn-ink); }
+.cell-btn.is-stale { color: var(--text-muted); }
+
+/* ---- 분석 설계 ---- */
+.analysis summary { padding: 14px 18px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.analysis[open] summary { border-bottom: 1px solid var(--grid); }
+.thesis { font-size: 15px; font-weight: 650; margin: 0 0 12px; }
+.insights { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.insights li { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; font-size: 13.5px; line-height: 1.6; }
+.itype { font-size: 11px; font-weight: 700; border-radius: 4px; text-align: center; height: 20px; line-height: 20px; margin-top: 2px; background: var(--surface-2); color: var(--text-secondary); }
+.it-strength { color: var(--accent-ink); background: var(--accent-soft); }
+.it-risk, .it-weakness { color: var(--warn-ink); background: var(--warn-bg); }
+.so-what { display: block; color: var(--text-secondary); font-size: 12.5px; }
+.analysis-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; margin-top: 14px; }
+.analysis-cols h4 { margin: 0 0 6px; font-size: 12.5px; color: var(--text-secondary); }
+.analysis-cols ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
+@media (max-width: 900px) { .analysis-cols { grid-template-columns: minmax(0, 1fr); } }

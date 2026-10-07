@@ -47,9 +47,16 @@ class Fact:
     retrieved_at: str
     restated: bool
     original_value: float | None
+    annual: bool = True  # False = 분기 공시(10-Q·6-K)의 분기·누적 값 또는 분기말 잔액
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def days(self) -> int | None:
+        if not self.period_start:
+            return None
+        return (date.fromisoformat(self.period_end) - date.fromisoformat(self.period_start)).days
 
 
 def fiscal_year_label(end: date) -> int:
@@ -134,6 +141,7 @@ def extract_facts(
     api_url: str | None = None,
     retrieved_at: str = "",
     concepts: Iterable[str] | None = None,
+    include_interim: bool = True,
 ) -> list[Fact]:
     cik = int(companyfacts["cik"])
     company = companyfacts.get("entityName", "")
@@ -173,6 +181,102 @@ def extract_facts(
                 retrieved_at=retrieved_at,
                 restated=restated,
                 original_value=float(original) if restated else None,
+            ))
+    if include_interim:
+        known = {f.fact_id for f in out}
+        out += [f for f in extract_interim_facts(companyfacts, ticker=ticker, api_url=api_url, retrieved_at=retrieved_at,
+                                                 concepts=concepts, currency=currency, fy_ends=fy_ends) if f.fact_id not in known]
+    return out
+
+
+# ---- 분기 공시 (10-Q·6-K) ------------------------------------------------------------------
+# 10-Q에는 3개월 값과 회계연도 초부터의 누적(6·9개월) 값이 함께 있다. 둘 다 원값으로 보관하고,
+# TTM(최근 12개월)은 '최근 연간 + 올해 누적 − 작년 같은 기간 누적'으로 계산한다 (metrics/recent.py).
+
+INTERIM_FORMS = frozenset({"10-Q", "10-Q/A", "6-K", "6-K/A"})
+INTERIM_DAYS = (range(80, 101), range(170, 191), range(260, 286))  # 3·6·9개월
+
+
+def _interim_days_ok(days: int) -> bool:
+    return any(days in r for r in INTERIM_DAYS)
+
+
+def _interim_rows(rows: Iterable[dict[str, Any]], kind: str) -> Iterable[dict[str, Any]]:
+    for r in rows:
+        if r.get("form") not in INTERIM_FORMS:
+            continue
+        if kind == "duration":
+            if "start" not in r:
+                continue
+            if not _interim_days_ok((date.fromisoformat(r["end"]) - date.fromisoformat(r["start"])).days):
+                continue
+        elif "start" in r:
+            continue
+        yield r
+
+
+def interim_fiscal_year(end: date, fy_ends: list[date]) -> int:
+    """분기가 속한 회계연도 = 그 분기 이후 처음 오는 회계연도 종료일의 연도 (아직 안 끝난 해는 마지막 연도 + n)."""
+    after = [e for e in fy_ends if e >= end]
+    if after:
+        return fiscal_year_label(min(after))
+    last = max(fy_ends)
+    return fiscal_year_label(last) + 1 + max(0, ((end - last).days - 1) // 371)
+
+
+def extract_interim_facts(
+    companyfacts: dict[str, Any],
+    *,
+    ticker: str,
+    api_url: str,
+    retrieved_at: str,
+    concepts: Iterable[str] | None,
+    currency: str,
+    fy_ends: set[str],
+) -> list[Fact]:
+    cik = int(companyfacts["cik"])
+    company = companyfacts.get("entityName", "")
+    facts = companyfacts["facts"]
+    fy_end_dates = sorted(date.fromisoformat(e) for e in fy_ends)
+    if not fy_end_dates:
+        return []
+
+    # 분기말 잔액(자본 등)은 분기 손익 기간의 종료일 값만 쓴다
+    interim_ends: set[str] = set()
+    for name in ("revenue", "net_income", "operating_income"):
+        for rule in CONCEPTS[name].tags:
+            rows = facts.get(rule.taxonomy, {}).get(rule.tag, {}).get("units", {}).get(currency, [])
+            interim_ends.update(r["end"] for r in _interim_rows(rows, "duration"))
+
+    out: list[Fact] = []
+    for name in concepts or CONCEPTS:
+        concept = CONCEPTS[name]
+        chosen: dict[tuple[str | None, str], tuple[Any, dict[str, Any], list[dict[str, Any]]]] = {}
+        for rule in concept.tags:  # 기간별로 우선순위가 가장 높은 태그
+            rows = facts.get(rule.taxonomy, {}).get(rule.tag, {}).get("units", {}).get(currency, [])
+            by_period: dict[tuple[str | None, str], list[dict[str, Any]]] = {}
+            for r in _interim_rows(rows, concept.kind):
+                if concept.kind == "instant" and r["end"] not in interim_ends:
+                    continue
+                by_period.setdefault((r.get("start"), r["end"]), []).append(r)
+            for key, group in by_period.items():
+                if key not in chosen:
+                    group.sort(key=lambda r: (r["filed"], r["accn"]))
+                    chosen[key] = (rule, group[-1], group)
+        for (start, end), (rule, row, group) in sorted(chosen.items(), key=lambda kv: (kv[0][1], kv[0][0] or "")):
+            end_d = date.fromisoformat(end)
+            restated = any(r["val"] != row["val"] for r in group)
+            out.append(Fact(
+                fact_id=f"{ticker}:{name}:{start}~{end}" if start else f"{ticker}:{name}:{end}",
+                ticker=ticker, cik=cik, company=company, concept=name, label_ko=concept.label_ko,
+                value=float(row["val"]), unit=currency,
+                fiscal_year=interim_fiscal_year(end_d, fy_end_dates), calendar_year=calendar_year_of(end_d),
+                period_start=start, period_end=end,
+                taxonomy=rule.taxonomy, tag=rule.tag, exact_tag=rule.exact,
+                form=row["form"], accn=row["accn"], filed=row["filed"], filing_url=filing_index_url(cik, row["accn"]),
+                api_url=api_url, retrieved_at=retrieved_at,
+                restated=restated, original_value=float(group[0]["val"]) if restated else None,
+                annual=False,
             ))
     return out
 

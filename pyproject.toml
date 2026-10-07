@@ -17,6 +17,9 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5",
     "qdrant-client>=1.12",
+    "openai>=2",
+    "langgraph>=1.0",
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]

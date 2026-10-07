@@ -91,6 +91,33 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agent(args: argparse.Namespace) -> int:
+    from peerlens.agent import run_agent
+
+    def show(e: dict) -> None:
+        if e["type"] == "node_start":
+            print(f"\n[{e['t_ms'] / 1000:6.1f}s] ▶ {e['title']}")
+        elif e["type"] in ("tool", "tool_result", "llm", "result", "error"):
+            mark = {"tool": "→", "tool_result": "←", "llm": "✦", "result": "•", "error": "✖"}[e["type"]]
+            print(f"           {mark} {e['title']}  {e['detail'][:150]}")
+
+    r = run_agent(args.request, show)
+    if r["status"] != "ok":
+        print(f"\n실패: {r['error']}")
+        return 1
+    memo = r["memo"]
+    print(f"\n{'=' * 70}\n{memo['title']}\n")
+    for b in memo["blocks"]:
+        print(f"■ {b['heading']}")
+        for s in b["sentences"]:
+            text = "".join(seg["text"] for seg in s["segments"])
+            ev = f" [{', '.join(s['evidence_ids'])}]" if s["evidence_ids"] else ""
+            warn = " ⚠ " + "; ".join(s["problems"]) if s["status"] == "fail" else ""
+            print(f"  - ({s['kind']}) {text}{ev}{warn}")
+    print(f"\n통계: {memo['stats']}\nLLM: {r['llm_usage']} · {r['elapsed_ms'] / 1000:.1f}초 · 기록 data/runs/{r['run_id']}.json")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -117,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--keywords", help="키워드 검색용 영어 질의 (기본: query 그대로)")
     s.add_argument("-k", type=int, default=5)
     s.set_defaults(func=cmd_search)
+
+    a = sub.add_parser("agent", help="요청 한 문장 → Peer 선정·재무 비교·근거 검색·메모 작성·검증")
+    a.add_argument("request")
+    a.set_defaults(func=cmd_agent)
 
     args = p.parse_args(argv)
     return args.func(args)

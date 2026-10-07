@@ -2,7 +2,32 @@
 
 공시 근거 기반 글로벌 Peer 비교·투자메모 AI Agent — 「국부펀드 KIC, AI 에이전트 공모전」 출품작.
 
-> 현재 단계: Phase 1 PoC — 1주차 데이터 파이프라인 (SEC XBRL → 표준 지표 → 비교표)
+> 현재 단계: Phase 1 PoC — XBRL 재무 비교 · 공시 원문 근거 검색 · Agent 루프 v0
+
+## Agent 구조 (LangGraph)
+
+```
+요청 → plan → peers → financials → ensure_index → research → write → verify ─┬→ finalize
+                                                                  ↑          │ 실패 & 재시도 < 2
+                                                                  └─ revise ←┘
+```
+
+| 노드 | 하는 일 | 사용 도구 / 모델 |
+|---|---|---|
+| plan | 요청 해석 → 대상·Peer·강조 지표·근거 질문(한/영) 계획 | GPT (fast) |
+| peers | 후보 점수(사업설명 임베딩 유사도·SIC·매출 규모) → 요청 관점으로 포함·제외 판단 | find_peers, GPT (fast) |
+| financials | XBRL 수집·지표 계산 → 수치 참조 목록 생성 | get_financials, calc_metrics |
+| ensure_index | 원문 색인이 없는 Peer는 자동 색인 | index_filings |
+| research | 근거 질문마다 기업별 할당 검색 (임베딩·리랭커 1회) | search_filings |
+| write | 출처 달린 메모. **숫자는 `[[참조ID]]`로만** 쓰고 값은 코드가 채움 | GPT (main) |
+| verify | 규칙 검사(직접 쓴 숫자·없는 참조·근거 누락) + 문장-근거 일치 판정 | GPT (fast) |
+| revise | 실패 문장만 재검색·재작성 (최대 2회), 이후에도 실패면 ⚠ 표시 | search_filings, GPT (main) |
+
+```bash
+peerlens agent "NVIDIA를 반도체 Peer와 비교해서 투자 검토 메모 써줘. 특히 수익성과 중국 리스크가 궁금해."
+```
+
+실행 기록(계획·도구 호출·LLM 토큰·검증 결과 전체)은 `data/runs/{run_id}.json`에 저장되고, 웹 화면 'AI 투자메모' 탭에서 실시간 Trace로 볼 수 있다.
 
 ## 빠른 실행
 
@@ -39,6 +64,9 @@ docker run -p 8000:8000 -e SEC_USER_AGENT="이름 이메일" peerlens
 | `GET /api/companies?q=` | 티커·회사명 검색 |
 | `POST /api/compare` | `{target, peers[], years, align}` → 비교표 셀·Peer 중앙값 |
 | `GET /api/metrics/{metric_id}` | 지표 계산식 + 입력 원값의 공시 출처 |
+| `GET /api/evidence?q=` | 공시 원문 근거 검색 |
+| `GET /api/agent/stream?q=` | Agent 실행 (Server-Sent Events로 Trace 실시간 전송, 마지막에 결과) |
+| `GET /api/agent/runs`, `/api/agent/runs/{id}` | 실행 기록 목록·상세 |
 
 CLI 출력: 터미널 비교표 + `data/output/` 에 `*_facts.csv`(원값·출처), `*_metrics.csv`(계산식·입력 fact_id·품질 플래그), `*_dataset.json`.
 
@@ -62,8 +90,11 @@ CLI 출력: 터미널 비교표 + `data/output/` 에 `*_facts.csv`(원값·출�
 |---|---|---|---|
 | 데이터 | SEC EDGAR XBRL API (companyfacts, submissions, company_tickers) | 재무 수치, 기업 정보 | sec.gov 공개 데이터. [접근 정책](https://www.sec.gov/os/accessing-edgar-data) 준수 (User-Agent, 10 req/s 이하) |
 | 데이터 | SEC EDGAR 공시 원문 (10-K, 20-F) | 근거 문단 검색 | 동일 (sec.gov 공개 데이터) |
+| 모델·API | OpenAI GPT (`gpt-6-sol` 작성·재작성, `gpt-6-luna` 계획·Peer 판단·검증) | Agent LLM | [OpenAI 이용약관](https://openai.com/policies/terms-of-use), 유료 API. 모델명은 `.env`로 교체 |
 | 모델·API | Cohere Embed v4 (`embed-v4.0`) | 공시 문단·질문 임베딩 | [Cohere 이용약관](https://cohere.com/terms-of-use), 유료 API (개발 중 체험판 키) |
 | 모델·API | Cohere Rerank 4.0 Fast (`rerank-v4.0-fast`) | 검색 결과 재순위 | 동일 |
+| 오픈소스 | LangGraph | Agent 상태 그래프 (분기·재시도) | MIT |
+| 오픈소스 | openai (Python SDK), pydantic | LLM 호출·출력 스키마 강제 | Apache-2.0 / MIT |
 | 오픈소스 | Qdrant (qdrant-client) | 벡터 검색 (dense + sparse) | Apache-2.0 |
 | 오픈소스 | BeautifulSoup4, lxml | 공시 HTML 파싱 | MIT / BSD-3-Clause |
 | 오픈소스 | httpx | HTTP 클라이언트 | BSD-3-Clause |

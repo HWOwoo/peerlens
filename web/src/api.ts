@@ -103,6 +103,85 @@ export type EvidenceResult = {
   results: EvidenceHit[];
 };
 
+// ---- Agent ----
+
+export type TraceEvent = {
+  seq: number;
+  t_ms: number;
+  type: "run_start" | "node_start" | "node_end" | "tool" | "tool_result" | "llm" | "result" | "error" | "run_end";
+  node: string;
+  title: string;
+  detail: string;
+  data: unknown;
+};
+
+export type Segment =
+  | { type: "text"; text: string }
+  | { type: "metric"; ref_id: string; text: string; label: string; metric_ids: string[]; formula: string };
+
+export type MemoSentence = {
+  id: string;
+  kind: "quant" | "qual" | "view";
+  text: string;
+  evidence_ids: string[];
+  segments: Segment[];
+  status: "pass" | "fail";
+  problems: string[];
+  verdict: "supported" | "partial" | "unsupported" | null;
+  judge_reason: string | null;
+  revised?: number;
+};
+
+export type MemoEvidence = EvidenceHit & { ref_id: string; question: string };
+
+export type AgentMemo = {
+  title: string;
+  blocks: { heading: string; sentences: MemoSentence[] }[];
+  evidence: MemoEvidence[];
+  stats: {
+    sentences: number;
+    quant: number;
+    quant_pass: number;
+    qual: number;
+    qual_supported: number;
+    warnings: number;
+    revisions: number;
+    metric_refs_used: number;
+    evidence_used: number;
+  };
+};
+
+export type PeerReportRow = {
+  ticker: string;
+  name?: string;
+  include: boolean;
+  score: number | null;
+  similarity?: number;
+  sic?: string;
+  sic_match?: string;
+  size_ratio?: number | null;
+  tool_reason?: string;
+  reason: string;
+};
+
+export type AgentResult = {
+  run_id: string;
+  request: string;
+  status: "ok" | "error";
+  error?: string;
+  target?: string;
+  peers?: string[];
+  plan?: { memo_angle: string; evidence_questions: { question_ko: string; keywords_en: string }[] };
+  peer_report?: PeerReportRow[];
+  comparison?: Comparison;
+  notes?: string[];
+  memo?: AgentMemo;
+  elapsed_ms: number;
+  llm_usage: { calls: number; input_tokens: number; output_tokens: number };
+  models: { main: string; fast: string };
+  trace: TraceEvent[];
+};
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
@@ -121,6 +200,26 @@ export const api = {
       body: JSON.stringify(body),
     }),
   metric: (id: string) => request<MetricDetail>(`/api/metrics/${encodeURIComponent(id)}`),
+  agentRuns: () => request<{ run_id: string; request: string; status: string; elapsed_ms: number; started_at: string }[]>("/api/agent/runs"),
+  agentRun: (id: string) => request<AgentResult>(`/api/agent/runs/${encodeURIComponent(id)}`),
+  /** Agent 실행을 SSE로 구독. 반환값은 구독 취소 함수. */
+  streamAgent: (q: string, onEvent: (e: TraceEvent) => void, onDone: (r: AgentResult) => void, onError: (msg: string) => void) => {
+    const es = new EventSource(`/api/agent/stream?q=${encodeURIComponent(q)}`);
+    let finished = false;
+    es.onmessage = (m) => {
+      const ev = JSON.parse(m.data);
+      if (ev.type === "final") {
+        finished = true;
+        es.close();
+        onDone(ev.result as AgentResult);
+      } else onEvent(ev as TraceEvent);
+    };
+    es.onerror = () => {
+      es.close();
+      if (!finished) onError("서버와 연결이 끊겼거나 다른 분석이 실행 중입니다. 잠시 후 다시 시도해 주세요.");
+    };
+    return () => es.close();
+  },
   evidence: (p: { q: string; tickers: string[]; sections: string[]; keywords?: string; k?: number }) => {
     const qs = new URLSearchParams({ q: p.q, k: String(p.k ?? 5) });
     if (p.tickers.length) qs.set("tickers", p.tickers.join(","));

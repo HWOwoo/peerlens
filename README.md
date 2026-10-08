@@ -99,13 +99,27 @@ CLI 출력: 터미널 비교표 + `data/output/` 에 `*_facts.csv`(원값·출�
 
 모든 Fact는 기업, CIK, 공시 종류, 접수번호, 공시일, 회계기간, taxonomy·태그, 공시 원문 URL, API URL, 수집일을 가진다.
 
+## 비용 관리 (개발·테스트)
+
+| 설정 (`.env`) | 내용 |
+|---|---|
+| `PEERLENS_LLM_PROVIDER=gemini` | 개발 중엔 Gemini 무료 등급으로 Agent 전체 실행 (정식 구성·최종 평가는 `openai`) |
+| `GEMINI_FALLBACK_MODELS` | 무료 등급 과부하(503) 시 넘어갈 대체 모델 |
+| `PEERLENS_LLM_CACHE=1` | 같은 입력이면 저장된 LLM 응답 재사용 (`data/llm_cache`) |
+| `PEERLENS_PROFILE=dev` | 모든 단계를 빠른(저가) 모델로 |
+| `PEERLENS_RUN_TOKEN_BUDGET` | 실행 1건 토큰 상한 — 넘으면 재작성 생략 |
+
+평가: `python eval/run_eval.py`(3문항·LLM 채점 끔) / `--judge`(채점) / `--full`(10문항 + 채점, 최종 확인용)
+
 ## 외부 데이터·라이브러리 출처 및 라이선스
 
 | 구분 | 항목 | 용도 | 출처·조건 |
 |---|---|---|---|
 | 데이터 | SEC EDGAR XBRL API (companyfacts, submissions, company_tickers) | 재무 수치, 기업 정보 | sec.gov 공개 데이터. [접근 정책](https://www.sec.gov/os/accessing-edgar-data) 준수 (User-Agent, 10 req/s 이하) |
 | 데이터 | SEC EDGAR 공시 원문 (10-K, 20-F) | 근거 문단 검색 | 동일 (sec.gov 공개 데이터) |
-| 모델·API | OpenAI GPT (`gpt-6-sol` 작성·재작성, `gpt-6-luna` 계획·Peer 판단·검증) | Agent LLM | [OpenAI 이용약관](https://openai.com/policies/terms-of-use), 유료 API. 모델명은 `.env`로 교체 |
+| 모델·API | OpenAI GPT (`gpt-6-sol` 작성·재작성, `gpt-6-luna` 계획·Peer 판단·검증) | Agent LLM (정식 구성) | [OpenAI 이용약관](https://openai.com/policies/terms-of-use), 유료 API. 모델명은 `.env`로 교체 |
+| 모델·API | Google Gemini (`gemini-3.6-flash`, 대체 `gemini-3.5-flash`·`gemini-3-flash-preview`) | Agent LLM (개발·테스트용) | [Gemini API 이용약관](https://ai.google.dev/gemini-api/terms), 무료 등급 — 입력이 서비스 개선에 쓰일 수 있어 공개 공시 데이터만 사용 |
+| 오픈소스 | google-genai | Gemini 호출 | Apache-2.0 |
 | 모델·API | Cohere Embed v4 (`embed-v4.0`) | 공시 문단·질문 임베딩 | [Cohere 이용약관](https://cohere.com/terms-of-use), 유료 API (개발 중 체험판 키) |
 | 모델·API | Cohere Rerank 4.0 Fast (`rerank-v4.0-fast`) | 검색 결과 재순위 | 동일 |
 | 오픈소스 | LangGraph | Agent 상태 그래프 (분기·재시도) | MIT |

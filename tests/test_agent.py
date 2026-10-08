@@ -146,7 +146,7 @@ def test_llm_cache_reuses_identical_calls(tmp_path, monkeypatch):
             calls.append(kw)
             return SimpleNamespace(output_parsed=J(items=[]), usage=SimpleNamespace(input_tokens=100, output_tokens=10))
 
-    m = llm_mod.LLM(model="main", fast_model="fast", use_cache=True, budget=150)
+    m = llm_mod.LLM(model="main", fast_model="fast", use_cache=True, budget=150, provider="openai")
     m._client = SimpleNamespace(responses=FakeResponses())
     _, c1 = m.parse(J, system="s", user="u", name="x")
     _, c2 = m.parse(J, system="s", user="u", name="x")
@@ -162,3 +162,37 @@ def test_dev_profile_uses_fast_model_everywhere(monkeypatch):
     monkeypatch.setenv("PEERLENS_PROFILE", "dev")
     m = llm_mod.LLM(model="main", fast_model="fast")
     assert m.model == "fast"
+
+
+def test_gemini_daily_quota_skips_model_without_waiting(tmp_path, monkeypatch):
+    """일일 한도(429, retryDelay 22시간)면 기다리지 않고 소진 기록 후 다음 모델로."""
+    import time
+    from types import SimpleNamespace
+
+    from google.genai import errors
+
+    from peerlens.agent import llm as llm_mod
+    from peerlens.agent.schemas import Judgements as J
+
+    monkeypatch.setattr(llm_mod._Gemini, "QUOTA_FILE", tmp_path / "q.json")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "m2")
+    used = []
+
+    class Models:
+        def generate_content(self, model, contents, config):
+            used.append(model)
+            if model == "m1":
+                raise errors.ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                                                          "message": "quota GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                                          "details": [{"retryDelay": "79114s"}]}})
+            return SimpleNamespace(parsed=J(items=[]), text="{}", usage_metadata=SimpleNamespace(
+                prompt_token_count=5, candidates_token_count=1, thoughts_token_count=0))
+
+    g = llm_mod._Gemini.__new__(llm_mod._Gemini)
+    g.client, g.min_interval = SimpleNamespace(models=Models()), 0
+    t = time.time()
+    _, _, _, model = g.parse("m1", J, "s", "u")
+    assert model == "m2" and used == ["m1", "m2"] and time.time() - t < 5
+    assert "m1" in g._exhausted()
+    g.parse("m1", J, "s", "u")  # 다음 호출은 소진된 m1을 아예 건너뜀
+    assert used == ["m1", "m2", "m2"]

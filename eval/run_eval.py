@@ -515,7 +515,13 @@ def main() -> None:
         else:
             print(f"\n[{q['id']}] {q['request']}", flush=True)
             t = time.perf_counter()
-            result = run_agent(q["request"])
+            def progress(e: dict[str, Any]) -> None:  # 단계별 진행을 바로 보여준다 (멈춤 여부 확인용)
+                if e["type"] == "node_start":
+                    print(f"    {e['t_ms'] / 1000:6.1f}s ▶ {e['title']}", flush=True)
+                elif e["type"] in ("llm", "error"):
+                    print(f"    {e['t_ms'] / 1000:6.1f}s   {e['title']} · {e['detail'][:90]}", flush=True)
+
+            result = run_agent(q["request"], progress)
             print(f"  → {result['status']} {time.perf_counter() - t:.0f}초", flush=True)
         row = score(q, result, judge_llm)
         rows.append(row)

@@ -21,7 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from peerlens import service
 from peerlens.agent.llm import LLM, LLMCall
 from peerlens.agent.peers import PeerFinder
-from peerlens.agent.refs import PLACEHOLDER, RefTable, build_metric_refs, render_text, segments, stray_numbers
+from peerlens.agent.refs import PLACEHOLDER, RefTable, build_metric_refs, masked_text, render_text, segments, stray_numbers
 from peerlens.agent.schemas import AnalysisPlan, Judgements, Memo, Plan, PeerSelection, Revision
 from peerlens.config import PROJECT_ROOT
 from peerlens.metrics.calc import METRICS
@@ -97,6 +97,15 @@ WRITER_SYSTEM = """너는 국부펀드 해외주식 리서치팀의 투자 검�
    - qual: 공시 내용 서술. evidence_ids 필수. 근거 문단에 실제로 있는 내용만.
    - view: 앞 문장들에서 도출한 해석·시사점. 새로운 사실이나 수치를 주장하지 않는다.
 7. 같은 문장 틀("X는 a로 Peer 중앙값 b를 c 상회했다")을 반복하지 않는다. 여러 지표를 한 문장에 묶고, 순위·변화폭·최근 분기로 변화를 보여 준다.
+8. 근거(E번호)를 단 문장은 검증에서 근거 문단과 한 줄씩 대조된다. 처음부터 통과하도록:
+   - 원인·사실은 근거 문단이 직접 말한 표현 범위 안에서만 쓴다. 근거에 없는 목적('~을 위해'), 배경, 영향, 리스크 해석을 덧붙이지 않는다.
+   - 해석·추론을 더하고 싶으면 근거 없이 별도의 view 문장으로 분리한다 (예: qual "…라고 공시했다." + view "이는 … 점검이 필요함을 시사한다.").
+   - 근거의 대상(부문·제품·기간)을 바꾸지 않는다 (영업손실을 순이익으로, 2024년 근거를 CY2025로 쓰지 않는다).
+   - 근거의 확신 정도를 지킨다 ('~할 수 있다'를 '~했다'로 쓰지 않는다).
+   - 여러 회사를 대조하는 문장은 언급한 회사마다 그 회사의 근거 E번호를 모두 evidence_ids에 넣는다.
+     해당 회사의 근거가 목록에 없으면 그 회사에 대한 사실 주장은 쓰지 않는다.
+   - 근거가 설명한 지표에만 원인을 연결한다 (근거가 '이익률 하락' 원인을 말하면 '매출 성장' 원인으로 쓰지 않는다).
+9. 기업 수는 [[COUNT.companies.ALL]](대상 포함)·[[COUNT.peers.ALL]]로 쓴다. "4개사"처럼 직접 세지 않는다.
 구성: title / summary(3문장: 논지 · 핵심 근거 · 핵심 리스크) / sections 4개:
  ① "비교 기준" — Peer 구성 관점과 비교 기간 기준 (view 1~2문장)
  ② "재무 비교와 동인" — 규모·성장·수익성·현금창출을 묶어 해석하고, 차이의 원인을 공시 근거로 설명 (quant+qual 5~7문장)
@@ -104,7 +113,9 @@ WRITER_SYSTEM = """너는 국부펀드 해외주식 리서치팀의 투자 검�
  ④ "검토 포인트" — 분석 설계의 watch_items를 구체적 확인 항목으로 (view 2~3문장)"""
 
 JUDGE_SYSTEM = """너는 투자 메모 검증 담당이다. 각 한국어 문장이 인용한 영어 공시 근거 문단에 의해 뒷받침되는지 엄격하게 판정한다.
-문장 속 수치(%, $, 순위)는 코드가 이미 검증했으니 판단하지 말고, 수치 외의 주장(사실·원인·대상)이 근거와 맞는지만 본다.
+문장의 ⟨수치⟩ 자리는 코드가 공시 원값으로 이미 검증한 수치다. ⟨수치⟩와, 그 수치에 대한 비교·순위·증감·기간 표현
+(예: 'Peer보다 높다', '1위', '개선됐다', '최근 12개월 기준')은 근거 문단과 대조하지 말고 판단에서 제외한다.
+근거와 대조할 것은 그 밖의 주장 — 사실·원인·대상·목적 — 뿐이다. 그런 주장이 없으면 supported다.
 - supported: 근거 문단이 수치 외 주장 전부를 직접 뒷받침 (자연스러운 번역·요약 차이는 허용)
 - partial: 일부만 뒷받침되거나, 근거보다 강하게 단정하거나, 근거에 없는 구체 대상·원인을 덧붙임
   (예: 근거는 '상각비'인데 문장은 '무형자산 상각비', 근거는 '영향을 줄 수 있다'인데 문장은 '영향을 줬다')
@@ -307,7 +318,7 @@ def _evidence_block(ctx: Ctx, only: set[str] | None = None, limit: int = 1000) -
 
 def _core_refs(ctx: Ctx) -> set[str]:
     """메모 작성·재작성에 항상 주는 핵심 수치: 최근 12개월·최근 분기·Peer 중앙값·차이·순위·규모."""
-    return {rid for rid in ctx.refs.metrics if rid.rsplit(".", 1)[-1] in ("TTM", "Q", "SCALE", "CHG")}
+    return {rid for rid in ctx.refs.metrics if rid.rsplit(".", 1)[-1] in ("TTM", "Q", "SCALE", "CHG", "ALL")}
 
 
 def _metric_block(ctx: Ctx, only: set[str] | None = None) -> str:
@@ -427,7 +438,7 @@ def verify_node(state: State, ctx: Ctx) -> State:
         parts = []
         for s in to_judge:
             ev = "\n".join(f"[{e}] {ctx.refs.evidence[e].hit['text'][:1600]}" for e in s["evidence_ids"])
-            parts.append(f"### {s['id']}\n문장: {render_text(s['text'], ctx.refs)[0]}\n근거:\n{ev}")
+            parts.append(f"### {s['id']}\n문장: {masked_text(s['text'])}\n근거:\n{ev}")
         judged, call = ctx.llm.parse(Judgements, system=JUDGE_SYSTEM, user="\n\n".join(parts), name="verifier", fast=True)
         ctx.llm_event("verify", call, f"문장-근거 일치 판정 {len(to_judge)}문장")
         for j in judged.items:

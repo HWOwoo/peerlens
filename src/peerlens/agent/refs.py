@@ -17,8 +17,13 @@ PLACEHOLDER = re.compile(r"\[\[([A-Za-z0-9_.:\-]+)\]\]")
 # \b는 한글 조사("Item 1A에")를 단어 문자로 봐서 경계로 인식하지 못하므로 영숫자만 기준으로 경계를 잡는다
 _ALLOWED_NUMERIC = re.compile(
     r"(?<![A-Za-z0-9])(?:10-K|10-Q|20-F|40-F|8-K|(?:FY|CY)\d{4}|\d{4}년|Item\s+\d{1,2}[A-D]?|Q[1-4])(?![A-Za-z0-9])"
-    # 기간 길이 표기: "최근 12개월", "3년간"
+    # 기간 길이 표기: "최근 12개월", "3년간" / 서수: "제3자", "제2세대"
     r"|(?<![\d.,])\d{1,2}(?:개월|년간)"
+    r"|제\d{1,2}(?=[가-힣])"
+    # 공정 이름: "Intel 7", "Intel 4"
+    r"|(?<=Intel )\d{1,2}[A-Z]?(?![\d.,%])"
+    # 반도체 규격 단위: "300mm 웨이퍼", "3nm", "2.5D", "800G", "5GHz" (금액 단위 M과 구분)
+    r"|(?<![A-Za-z0-9$.,])\d+(?:\.\d+)?(?:mm|μm|um|nm|GHz|MHz|Gbps|Tbps|D)(?![A-Za-z])"
     # 제품·공정·규격 이름: H100, MI308, HBM3E, B200 (영문자로 시작) / 18A, 5G, 3nm (숫자+영문, 금액·배수 단위 B·M·K·T·x 제외)
     r"|(?<![A-Za-z0-9$.,])[A-Za-z]+\d+[A-Za-z0-9]*"
     r"|(?<![A-Za-z0-9$.,])\d+(?![BMKTbmktxX%])[A-Za-z]+[A-Za-z0-9]*",
@@ -113,8 +118,12 @@ def build_metric_refs(comparison: dict[str, Any]) -> dict[str, MetricRef]:
             rid = f"{tkr}.revenue.SCALE"
             refs[rid] = MetricRef(rid, f"{tkr} 매출 규모 [{sc['label']}]", sc["value"], _money(sc["value"], sc["unit"]), [], f"revenue ({sc['how']})")
 
-    # 분석용 파생 수치 (코드 계산): 순위, 3년 변화폭
+    # 분석용 파생 수치 (코드 계산): 기업 수, 순위, 3년 변화폭
     tickers = comparison["tickers"]
+    refs["COUNT.companies.ALL"] = MetricRef("COUNT.companies.ALL", "비교 기업 수 (대상 포함)", float(len(tickers)),
+                                            f"{len(tickers)}개사", [], "len(target + peers)")
+    refs["COUNT.peers.ALL"] = MetricRef("COUNT.peers.ALL", "Peer 기업 수 (대상 제외)", float(len(tickers) - 1),
+                                        f"{len(tickers) - 1}개사", [], "len(peers)")
     for name in label:
         # 최근 12개월 순위 (오래된 데이터 제외, 높을수록 1위)
         vals = [(r.value, t) for t in tickers if t not in stale and (r := refs.get(f"{t}.{name}.TTM")) and r.value is not None]
@@ -157,6 +166,12 @@ def render_text(text: str, refs: RefTable) -> tuple[str, list[dict[str, Any]]]:
         return r.display
 
     return PLACEHOLDER.sub(sub, text), used
+
+
+def masked_text(text: str) -> str:
+    """근거 판정용: 코드가 이미 검증한 수치 자리표시자를 ⟨수치⟩로 가린다.
+    판정 모델이 숫자·순위까지 근거 문단에서 찾다가 '근거 없음'으로 잘못 판정하는 것을 막는다."""
+    return PLACEHOLDER.sub("⟨수치⟩", text)
 
 
 def segments(text: str, refs: RefTable) -> list[dict[str, Any]]:

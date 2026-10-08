@@ -34,7 +34,7 @@ from peerlens import service  # noqa: E402
 from peerlens.agent import run_agent  # noqa: E402
 from peerlens.agent.graph import JUDGE_SYSTEM  # noqa: E402
 from peerlens.agent.llm import LLM  # noqa: E402
-from peerlens.agent.refs import stray_numbers  # noqa: E402
+from peerlens.agent.refs import masked_text, stray_numbers  # noqa: E402
 from peerlens.agent.schemas import Judgements  # noqa: E402
 
 # ---- 수치 독립 재계산 ---------------------------------------------------------------
@@ -177,6 +177,13 @@ def check_numbers(result: dict[str, Any]) -> dict[str, Any]:
                 kind, metric, period = seg["ref_id"].split(".")
                 period = int(period) if period.isdigit() else period
                 scale = period == "SCALE"
+                if kind == "COUNT":  # 비교 기업 수
+                    expect = len(comp["tickers"]) - (1 if metric == "peers" else 0)
+                    if _shown(seg["text"]) == expect:
+                        ok += 1
+                    else:
+                        errors.append(f"{seg['ref_id']}: 표시 {seg['text']} / 재계산 {expect}개사")
+                    continue
                 if kind == "RANK":  # 최근 12개월 순위: 오래된 데이터 제외, 높을수록 1위
                     vals = {t: rc(cell_ids[(t, metric, "TTM")])[0] for t in comp["tickers"]
                             if (t, metric, "TTM") in cell_ids and t not in stale}
@@ -270,7 +277,7 @@ def independent_judge(result: dict[str, Any], llm: LLM) -> dict[str, Any]:
         return {"judge_total": 0, "judge_supported": 0, "judge_details": []}
     parts = []
     for s in quals:
-        text = "".join(seg["text"] for seg in s["segments"])
+        text = masked_text(s["text"])  # Agent 판정과 같은 조건: 코드가 검증한 수치는 가린다
         cited = "\n".join(f"[{i}] {ev[i]['text'][:2200]}" for i in s["evidence_ids"] if i in ev)
         parts.append(f"### {s['id']}\n문장: {text}\n근거:\n{cited}")
     judged, call = llm.parse(Judgements, system=JUDGE_SYSTEM, user="\n\n".join(parts), name="independent_judge", fast=False)

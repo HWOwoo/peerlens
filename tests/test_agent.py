@@ -196,3 +196,16 @@ def test_gemini_daily_quota_skips_model_without_waiting(tmp_path, monkeypatch):
     assert "m1" in g._exhausted()
     g.parse("m1", J, "s", "u")  # 다음 호출은 소진된 m1을 아예 건너뜀
     assert used == ["m1", "m2", "m2"]
+
+
+def test_stray_allows_process_names_and_ordinals_but_not_counts():
+    assert stray_numbers("Intel 7 공정과 Intel 18A, 제3자 공급망") == []
+    assert stray_numbers("300mm 웨이퍼, 3nm 공정, 2.5D 패키징") == []
+    assert [x.strip() for x in stray_numbers("매출 $300M, 5M 달러")] == ["300", "5"]  # 금액 단위 M은 여전히 금지
+    assert [x.strip() for x in stray_numbers("아날로그 4개사를 비교")] == ["4"]  # 기업 수는 [[COUNT…]]로
+
+
+def test_masked_text_hides_verified_numbers_for_judge():
+    from peerlens.agent.refs import masked_text
+
+    assert masked_text("영업이익률 [[AAA.operating_margin.TTM]]로 [[RANK.operating_margin.TTM]]") == "영업이익률 ⟨수치⟩로 ⟨수치⟩"

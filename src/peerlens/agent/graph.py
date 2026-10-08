@@ -128,6 +128,8 @@ class Ctx:
         self.llm = LLM()
         self.refs = RefTable()
         self.events: list[dict[str, Any]] = []
+        self.years: list[int] = []  # 연간 비교 연도 (수치 목록 다이어트용)
+        self.target: str = ""
 
     def emit(self, type_: str, node: str, title: str, detail: str = "", data: Any = None) -> None:
         self.seq += 1
@@ -137,7 +139,8 @@ class Ctx:
         self._emit(ev)
 
     def llm_event(self, node: str, call: LLMCall, what: str) -> None:
-        self.emit("llm", node, f"LLM · {what}", f"{call.model} · 입력 {call.input_tokens:,} / 출력 {call.output_tokens:,} 토큰 · {call.ms / 1000:.1f}초",
+        how = "캐시 재사용(과금 없음)" if call.cached else f"{call.ms / 1000:.1f}초"
+        self.emit("llm", node, f"LLM · {what}", f"{call.model} · 입력 {call.input_tokens:,} / 출력 {call.output_tokens:,} 토큰 · {how}",
                   asdict(call))
 
 
@@ -225,6 +228,8 @@ def financials_node(state: State, ctx: Ctx) -> State:
              f"{state['target']} + {', '.join(state['peers'])} · {state['plan']['years']}년 · 달력연도 정렬")
     comp = service.compare(state["target"], state["peers"], years=state["plan"]["years"], align="calendar")
     ctx.refs.metrics = build_metric_refs(comp)
+    ctx.years = comp["years"]
+    ctx.target = comp["target"]
     notes = list(state.get("notes", []))
     if comp["missing_latest"]:
         notes.append(f"{', '.join(comp['missing_latest'])}: {comp['year_label']}{comp['latest_year']} 연간 XBRL 미공시 → 해당 칸 비움")
@@ -289,17 +294,45 @@ def research_node(state: State, ctx: Ctx) -> State:
     return {}
 
 
-def _evidence_block(ctx: Ctx, limit: int = 1300) -> str:
+def _evidence_block(ctx: Ctx, only: set[str] | None = None, limit: int = 1000) -> str:
     lines = []
     for e in ctx.refs.evidence.values():
+        if only is not None and e.ref_id not in only:
+            continue
         h = e.hit
         head = f"{e.ref_id} [{h['ticker']} {h['form']} {h['section_label']}{' · ' + h['subheading'][:80] if h['subheading'] else ''}]"
         lines.append(f"{head}\n{h['text'][:limit]}")
     return "\n\n".join(lines)
 
 
-def _metric_block(ctx: Ctx) -> str:
-    return "\n".join(f"[[{r.ref_id}]] = {r.display} — {r.label}" for r in ctx.refs.metrics.values() if r.value is not None)
+def _core_refs(ctx: Ctx) -> set[str]:
+    """메모 작성·재작성에 항상 주는 핵심 수치: 최근 12개월·최근 분기·Peer 중앙값·차이·순위·규모."""
+    return {rid for rid in ctx.refs.metrics if rid.rsplit(".", 1)[-1] in ("TTM", "Q", "SCALE", "CHG")}
+
+
+def _metric_block(ctx: Ctx, only: set[str] | None = None) -> str:
+    """수치 참조 목록. 연도별 값은 첫해·마지막 해만 (중간 연도는 변화폭 참조로 대신해 입력 토큰을 줄인다)."""
+    years = ctx.years
+    keep_years = {str(years[0]), str(years[-1])} if years else set()
+    out = []
+    for r in ctx.refs.metrics.values():
+        if r.value is None:
+            continue
+        if only is not None and r.ref_id not in only:
+            continue
+        who, _, period = r.ref_id.split(".", 2) if r.ref_id.count(".") == 2 else ("", "", r.ref_id.rsplit(".", 1)[-1])
+        if only is None and period.isdigit():
+            if period not in keep_years:
+                continue
+            # 첫해 값은 대상 기업·Peer 중앙값·차이만 (Peer 개별 첫해 값은 추세 해석에 거의 안 쓰인다)
+            if years and period == str(years[0]) and who not in (ctx.target, "PEER", "DIFF"):
+                continue
+        out.append(f"[[{r.ref_id}]] = {r.display} — {r.label}")
+    return "\n".join(out)
+
+
+def _refs_in(*texts: str) -> set[str]:
+    return {m for t in texts for m in PLACEHOLDER.findall(t)}
 
 
 def _with_ids(memo: Memo) -> dict[str, Any]:
@@ -314,14 +347,14 @@ def _with_ids(memo: Memo) -> dict[str, Any]:
     return {"title": memo.title, "blocks": blocks}
 
 
-def _context(state: State, ctx: Ctx) -> str:
+def _context(state: State, ctx: Ctx, refs: set[str] | None = None, evidence: set[str] | None = None, ev_limit: int = 1000) -> str:
     plan = state["plan"]
     peers_txt = "\n".join(f"- {p['ticker']}: {p['reason']}" for p in state["peer_report"] if p["include"])
     labels = ", ".join(METRICS[m].label_ko for m in plan["focus_metrics"] if m in METRICS)
     return (f"요청: {state['request']}\n관점: {plan['memo_angle']}\n강조 지표: {labels}\n"
             f"대상: {state['target']}\nPeer와 선정 이유:\n{peers_txt}\n"
             f"데이터 유의사항: {'; '.join(state.get('notes', [])) or '없음'}\n\n"
-            f"## 수치 참조 목록 (이 ID만 [[ ]]로 사용)\n{_metric_block(ctx)}\n\n## 공시 근거 목록\n{_evidence_block(ctx)}")
+            f"## 수치 참조 목록 (이 ID만 [[ ]]로 사용)\n{_metric_block(ctx, refs)}\n\n## 공시 근거 목록\n{_evidence_block(ctx, evidence, ev_limit)}")
 
 
 def _analysis_text(a: dict[str, Any]) -> str:
@@ -336,7 +369,8 @@ def _analysis_text(a: dict[str, Any]) -> str:
 
 @_node("analyze")
 def analyze_node(state: State, ctx: Ctx) -> State:
-    a, call = ctx.llm.parse(AnalysisPlan, system=ANALYST_SYSTEM, user=_context(state, ctx), name="analyst")
+    user = _context(state, ctx, ev_limit=800)  # 전체 근거를 보되 문단은 앞부분만
+    a, call = ctx.llm.parse(AnalysisPlan, system=ANALYST_SYSTEM, user=user, name="analyst")
     ctx.llm_event("analyze", call, "분석 설계 (논지·인사이트·Peer 대비·확인할 점)")
     linked = sum(1 for x in a.insights if x.metric_refs and x.evidence_ids)
     ctx.emit("result", "analyze", f"인사이트 {len(a.insights)}개 (수치+근거 연결 {linked}개)", a.thesis, a.model_dump())
@@ -345,7 +379,14 @@ def analyze_node(state: State, ctx: Ctx) -> State:
 
 @_node("write")
 def write_node(state: State, ctx: Ctx) -> State:
-    user = f"## 분석 설계 (이 뼈대대로 쓴다)\n{_analysis_text(state['analysis'])}\n\n{_context(state, ctx)}"
+    # 입력 다이어트: 분석 설계가 고른 수치·근거 + 핵심 수치만 (전체 목록은 분석 단계에서 이미 검토함)
+    a = state["analysis"]
+    plan_refs = {r for x in a["insights"] for r in x["metric_refs"]} | _refs_in(
+        a["thesis"], *[x["claim"] for x in a["insights"]], *a["peer_contrasts"], *a["watch_items"])
+    plan_ev = {e for x in a["insights"] for e in x["evidence_ids"]}
+    extra = [e for e in ctx.refs.evidence if e not in plan_ev][: max(0, 10 - len(plan_ev))]  # Peer 대조용 여유분
+    user = (f"## 분석 설계 (이 뼈대대로 쓴다)\n{_analysis_text(a)}\n\n"
+            f"{_context(state, ctx, refs=plan_refs | _core_refs(ctx), evidence=plan_ev | set(extra))}")
     memo, call = ctx.llm.parse(Memo, system=WRITER_SYSTEM, user=user, name="writer")
     ctx.llm_event("write", call, "메모 초안 작성")
     m = _with_ids(memo)
@@ -385,7 +426,7 @@ def verify_node(state: State, ctx: Ctx) -> State:
     if to_judge:
         parts = []
         for s in to_judge:
-            ev = "\n".join(f"[{e}] {ctx.refs.evidence[e].hit['text'][:2200]}" for e in s["evidence_ids"])
+            ev = "\n".join(f"[{e}] {ctx.refs.evidence[e].hit['text'][:1600]}" for e in s["evidence_ids"])
             parts.append(f"### {s['id']}\n문장: {render_text(s['text'], ctx.refs)[0]}\n근거:\n{ev}")
         judged, call = ctx.llm.parse(Judgements, system=JUDGE_SYSTEM, user="\n\n".join(parts), name="verifier", fast=True)
         ctx.llm_event("verify", call, f"문장-근거 일치 판정 {len(to_judge)}문장")
@@ -402,8 +443,11 @@ def verify_node(state: State, ctx: Ctx) -> State:
     return {"checks": checks}
 
 
-def route_after_verify(state: State) -> str:
+def route_after_verify(state: State, ctx: Ctx | None = None) -> str:
     fails = [c for c in state["checks"].values() if c["status"] == "fail"]
+    if fails and ctx is not None and ctx.llm.over_budget():  # 토큰 상한 초과 → 재작성 대신 경고로 종료
+        ctx.emit("result", "verify", "토큰 상한 도달 — 재작성 생략", f"실패 {len(fails)}문장은 경고로 표시")
+        return "finalize"
     return "revise" if fails and state.get("attempt", 0) < MAX_REVISIONS else "finalize"
 
 
@@ -415,19 +459,23 @@ def revise_node(state: State, ctx: Ctx) -> State:
     failed = [s for s in _sentences(state["memo"]) if state["checks"][s["id"]]["status"] == "fail"]
 
     # 근거 문제인 문장은 그 문장을 질의로 다시 검색 (해당 항목만 재검색)
+    new_ev: set[str] = set()
     for s in failed:
         c = state["checks"][s["id"]]
-        if s["kind"] == "qual" and (c["verdict"] in ("partial", "unsupported") or not s["evidence_ids"]):
+        if s["evidence_ids"] and c["verdict"] in ("partial", "unsupported") or (s["kind"] == "qual" and not s["evidence_ids"]):
             mentioned = [t for t in tickers if t in s["text"]] or [state["target"]]
             q = render_text(s["text"], ctx.refs)[0]
             ctx.emit("tool", "revise", "search_filings (재검색)", f"{s['id']}: {q[:80]}… ({', '.join(mentioned)})")
-            _search(ctx, "revise", q, None, mentioned, [], k=3)
+            new_ev |= set(_search(ctx, "revise", q, None, mentioned, [], k=3))
 
     items = "\n".join(
         f"- {s['id']} ({s['kind']}): {s['text']} | 근거 {s['evidence_ids']} | 문제: {' / '.join(state['checks'][s['id']]['problems'])}"
         for s in failed
     )
-    user = (f"## 실패한 문장\n{items}\n\n## 수치 참조 목록\n{_metric_block(ctx)}\n\n## 공시 근거 목록\n{_evidence_block(ctx)}")
+    # 입력 다이어트: 실패 문장이 쓴 수치·근거 + 새로 찾은 근거 + 핵심 수치만
+    refs = _refs_in(*[s["text"] for s in failed]) | _core_refs(ctx)
+    ev = {e for s in failed for e in s["evidence_ids"]} | new_ev
+    user = (f"## 실패한 문장\n{items}\n\n## 수치 참조 목록\n{_metric_block(ctx, refs)}\n\n## 공시 근거 목록\n{_evidence_block(ctx, ev)}")
     rev, call = ctx.llm.parse(Revision, system=REVISER_SYSTEM, user=user, name="reviser")
     ctx.llm_event("revise", call, f"실패 {len(failed)}문장 재작성")
 
@@ -471,7 +519,7 @@ def build_graph(ctx: Ctx):
     g.add_edge("research", "analyze")
     g.add_edge("analyze", "write")
     g.add_edge("write", "verify")
-    g.add_conditional_edges("verify", route_after_verify, {"revise": "revise", "finalize": "finalize"})
+    g.add_conditional_edges("verify", lambda s: route_after_verify(s, ctx), {"revise": "revise", "finalize": "finalize"})
     g.add_edge("revise", "verify")
     g.add_edge("finalize", END)
     return g.compile()

@@ -130,3 +130,35 @@ def test_revise_patches_only_failed_sentences(ctx, monkeypatch):
     ids = [s["id"] for s in out["memo"]["blocks"][0]["sentences"]]
     assert ids == ["s1", "s2"] and out["attempt"] == 1
     assert out["memo"]["blocks"][0]["sentences"][1]["revised"] == 1
+
+
+def test_llm_cache_reuses_identical_calls(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from peerlens.agent import llm as llm_mod
+    from peerlens.agent.schemas import Judgements as J
+
+    monkeypatch.setattr(llm_mod, "CACHE_DIR", tmp_path)
+    calls = []
+
+    class FakeResponses:
+        def parse(self, **kw):
+            calls.append(kw)
+            return SimpleNamespace(output_parsed=J(items=[]), usage=SimpleNamespace(input_tokens=100, output_tokens=10))
+
+    m = llm_mod.LLM(model="main", fast_model="fast", use_cache=True, budget=150)
+    m._client = SimpleNamespace(responses=FakeResponses())
+    _, c1 = m.parse(J, system="s", user="u", name="x")
+    _, c2 = m.parse(J, system="s", user="u", name="x")
+    _, c3 = m.parse(J, system="s", user="other", name="x")
+    assert len(calls) == 2 and not c1.cached and c2.cached and not c3.cached
+    assert m.usage()["cached_calls"] == 1 and m.spent() == 220
+    assert m.over_budget()  # 220 >= 150
+
+
+def test_dev_profile_uses_fast_model_everywhere(monkeypatch):
+    from peerlens.agent import llm as llm_mod
+
+    monkeypatch.setenv("PEERLENS_PROFILE", "dev")
+    m = llm_mod.LLM(model="main", fast_model="fast")
+    assert m.model == "fast"

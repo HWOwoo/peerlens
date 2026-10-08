@@ -373,7 +373,8 @@ def check_request(q: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
 # ---- 실행 ---------------------------------------------------------------------------
 
 
-def score(q: dict[str, Any], result: dict[str, Any], llm: LLM) -> dict[str, Any]:
+def score(q: dict[str, Any], result: dict[str, Any], llm: LLM | None) -> dict[str, Any]:
+    """llm=None이면 LLM 채점(독립 재판정·품질 채점)을 건너뛴다 — 코드 검증(수치·인용·요청 반영)만, 비용 0."""
     row: dict[str, Any] = {"id": q["id"], "request": q["request"], "run_id": result["run_id"], "status": result["status"],
                            "elapsed_s": round(result["elapsed_ms"] / 1000, 1), "llm_calls": result["llm_usage"]["calls"],
                            "tokens_in": result["llm_usage"]["input_tokens"], "tokens_out": result["llm_usage"]["output_tokens"]}
@@ -386,8 +387,9 @@ def score(q: dict[str, Any], result: dict[str, Any], llm: LLM) -> dict[str, Any]
         "target": result["target"], "peers": result["peers"],
         "sentences": st["sentences"], "revisions": st["revisions"], "warnings": st["warnings"],
         "agent_qual_supported": st["qual_supported"], "agent_qual": st["qual"],
-        **check_numbers(result), **check_citations(result), **independent_judge(result, llm), **check_request(q, result),
-        **memo_quality(q, result, llm),
+        **check_numbers(result), **check_citations(result), **check_request(q, result),
+        **(independent_judge(result, llm) if llm else {}),
+        **(memo_quality(q, result, llm) if llm else {"repetition": round(repetition_ratio(result), 2)}),
     })
     row["success"] = st["sentences"] >= 10 and row["target_ok"]
     return row
@@ -397,7 +399,7 @@ def _pct(a: float, b: float) -> str:
     return f"{a / b * 100:.1f}%" if b else "–"
 
 
-def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str]) -> None:
+def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str], judge_usage: dict | None = None) -> None:
     ok = [r for r in rows if r.get("success")]
     done = [r for r in rows if r["status"] == "ok"]
     s = lambda k: sum(r.get(k, 0) or 0 for r in done)  # noqa: E731
@@ -427,7 +429,9 @@ def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str]) -> No
         f"| Peer 근거 커버리지 | {statistics.mean(cover) * 100:.0f}% | Peer 중 근거가 인용된 기업 비율 |" if cover else "| Peer 근거 커버리지 | – | |",
         f"| 재작성 발생 | {sum(1 for r in done if r['revisions'])}건 (총 {s('revisions')}회) | 검증 실패 → 재검색·재작성 |",
         f"| 최종 경고 문장 | {s('warnings')}개 | 재작성 후에도 검증 실패 |",
-        f"| LLM 사용량 | 질문당 평균 {s('llm_calls') / max(len(done), 1):.1f}회, 입력 {s('tokens_in') / max(len(done), 1):,.0f} / 출력 {s('tokens_out') / max(len(done), 1):,.0f} 토큰 | |",
+        f"| LLM 사용량 (Agent) | 질문당 평균 {s('llm_calls') / max(len(done), 1):.1f}회, 입력 {s('tokens_in') / max(len(done), 1):,.0f} / 출력 {s('tokens_out') / max(len(done), 1):,.0f} 토큰 | 캐시 재사용분 제외 |",
+        (f"| LLM 사용량 (채점) | 입력 {judge_usage['input_tokens']:,} / 출력 {judge_usage['output_tokens']:,} 토큰 (캐시 재사용 {judge_usage['cached_calls']}회) | 평가 전체 합계 |"
+         if judge_usage else "| LLM 채점 | 꺼짐 (코드 검증만) | `--judge` 또는 `--full`로 켬 |"),
         "",
         "## 메모 품질 (독립 모델 채점, 1~5점)",
         "",
@@ -457,7 +461,7 @@ def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str]) -> No
             note.append(f"수치 오류 {len(r['number_errors'])}")
         lines.append(
             f"| {r['id']} | {r['target']} | {', '.join(r['peers'])} | {r['elapsed_s']:.0f}초 | {r['sentences']} | "
-            f"{r['numbers_ok']}/{r['numbers_total']} | {r['citations_found']}/{r['citations']} | {r['judge_supported']}/{r['judge_total']} | "
+            f"{r['numbers_ok']}/{r['numbers_total']} | {r['citations_found']}/{r['citations']} | {r.get('judge_supported', '–')}/{r.get('judge_total', '–')} | "
             f"{r['revisions']} | {r.get('quality_avg', '–')} | {'; '.join(note) or '–'} |"
         )
     issues = [(r["id"], d) for r in done for d in r.get("judge_details", [])]
@@ -473,15 +477,34 @@ def report(rows: list[dict[str, Any]], path: Path, models: dict[str, str]) -> No
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+QUICK = ["q01", "q04", "q09"]  # 자동 Peer·수익성 악화 설명·지정 Peer — 서로 다른 경로를 하나씩
+
+
 def main() -> None:
+    """비용을 아끼는 기본값:
+        python eval/run_eval.py            빠른 평가 — 3문항, LLM 채점 없음 (코드 검증만), LLM 캐시 사용
+        python eval/run_eval.py --judge    + LLM 채점 (독립 재판정·품질 채점)
+        python eval/run_eval.py --full     10문항 + LLM 채점 — 개선 효과를 확정할 때만
+        python eval/run_eval.py q03 q05    지정 문항만
+        python eval/run_eval.py --rescore  실행 없이 저장된 결과 다시 채점 (--judge와 함께 쓰면 채점만 추가)
+    """
+    import os
+
+    os.environ.setdefault("PEERLENS_LLM_CACHE", "1")  # 같은 입력 재실행·재채점은 과금 없음
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     rescore = "--rescore" in sys.argv
+    full = "--full" in sys.argv
+    judge = full or "--judge" in sys.argv
     questions = json.loads((ROOT / "questions.json").read_text(encoding="utf-8"))
     if args:
         questions = [q for q in questions if q["id"] in args]
+    elif not full and not rescore:
+        questions = [q for q in questions if q["id"] in QUICK]
     out_dir = ROOT / "results"
     out_dir.mkdir(exist_ok=True)
     llm = LLM()
+    judge_llm = llm if judge else None
+    print(f"평가: {len(questions)}문항 · LLM 채점 {'켬' if judge else '끔'} · 캐시 {os.environ['PEERLENS_LLM_CACHE']}", flush=True)
     runs_dir = ROOT.parent / "data" / "runs"
     rows = []
     for q in questions:
@@ -494,14 +517,19 @@ def main() -> None:
             t = time.perf_counter()
             result = run_agent(q["request"])
             print(f"  → {result['status']} {time.perf_counter() - t:.0f}초", flush=True)
-        row = score(q, result, llm)
+        row = score(q, result, judge_llm)
         rows.append(row)
         print(f"  수치 {row.get('numbers_ok')}/{row.get('numbers_total')} · 인용 {row.get('citations_found')}/{row.get('citations')}"
               f" · 독립판정 {row.get('judge_supported')}/{row.get('judge_total')} · 키워드누락 {row.get('mentions_missing')}", flush=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     (out_dir / f"{stamp}.json").write_text(json.dumps({"rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
-    report(rows, ROOT / "REPORT.md", {"main": llm.model, "fast": llm.fast_model})
-    print(f"\n보고서: eval/REPORT.md · 원본: eval/results/{stamp}.json")
+    report(rows, ROOT / "REPORT.md", {"main": llm.model, "fast": llm.fast_model}, judge_usage=llm.usage() if judge else None)
+    agent_in = sum(r.get("tokens_in", 0) for r in rows if not rescore)
+    agent_out = sum(r.get("tokens_out", 0) for r in rows if not rescore)
+    ju = llm.usage()
+    print(f"\n과금 토큰 — Agent 입력 {agent_in:,} / 출력 {agent_out:,} · 채점 입력 {ju['input_tokens']:,} / 출력 {ju['output_tokens']:,}"
+          f" (캐시 재사용 {ju['cached_calls']}회)")
+    print(f"보고서: eval/REPORT.md · 원본: eval/results/{stamp}.json")
 
 
 if __name__ == "__main__":

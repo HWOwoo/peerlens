@@ -13,6 +13,10 @@ ENV PYTHONUNBUFFERED=1 PEERLENS_CACHE_DIR=/app/data/cache PEERLENS_WEB_DIST=/app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 RUN pip install --no-cache-dir .
+# 메모 PDF(render_report)용 Chromium + 한글 글꼴
+RUN playwright install --with-deps chromium \
+ && apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=web /web/dist web/dist
 EXPOSE 8000
 # SEC_USER_AGENT는 실행 시 환경변수로 주입 (이미지에 넣지 않음)

@@ -47,6 +47,7 @@ Emit = Callable[[dict[str, Any]], None]
 
 class State(TypedDict, total=False):
     request: str
+    peer_override: list[str]  # 사용자가 화면에서 고친 Peer 구성
     plan: dict[str, Any]
     target: str
     peers: list[str]
@@ -190,16 +191,20 @@ def plan_node(state: State, ctx: Ctx) -> State:
     ctx.llm_event("plan", call, "요청 해석·작업 계획")
     target = _resolve(plan.target)
     peers = [_resolve(p) for p in plan.peers]
+    if state.get("peer_override"):  # 사람의 개입: 사용자가 화면에서 고친 Peer 구성이 계획보다 우선
+        peers = [_resolve(p) for p in state["peer_override"]]
+        ctx.emit("result", "plan", "사용자가 수정한 Peer 구성 사용", ", ".join(peers))
     plan.years = min(max(plan.years or 3, 2), 5)
     ctx.emit("result", "plan", f"대상 {target}", plan.memo_angle, plan.model_dump())
-    return {"plan": plan.model_dump(), "target": target, "peers": [p for p in peers if p != target], "notes": []}
+    return {"plan": plan.model_dump(), "target": target, "peers": list(dict.fromkeys(p for p in peers if p != target)), "notes": []}
 
 
 @_node("peers")
 def peers_node(state: State, ctx: Ctx) -> State:
     target, plan = state["target"], state["plan"]
     if state.get("peers"):
-        report = [{"ticker": p, "include": True, "reason": "사용자 지정", "score": None} for p in state["peers"]]
+        why = "사용자가 화면에서 수정한 Peer 구성" if state.get("peer_override") else "요청에서 사용자 지정"
+        report = [{"ticker": p, "include": True, "reason": why, "score": None} for p in state["peers"]]
         ctx.emit("result", "peers", "사용자 지정 Peer 사용", ", ".join(state["peers"]), report)
         return {"peer_report": report}
 
@@ -581,13 +586,16 @@ def _render_analysis(a: dict[str, Any] | None, ctx: Ctx) -> dict[str, Any] | Non
     }
 
 
-def run_agent(request: str, emit: Emit | None = None) -> dict[str, Any]:
+def run_agent(request: str, emit: Emit | None = None, *, peers: list[str] | None = None,
+              parent_run_id: str | None = None) -> dict[str, Any]:
+    """peers: 사용자가 고친 Peer 구성 (사람의 개입). parent_run_id: 수정 전 실행 (화면에서 이어 보기용)."""
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     ctx = Ctx(emit or (lambda e: None))
-    ctx.emit("run_start", "run", "Agent 실행 시작", request, {"run_id": run_id})
-    result: dict[str, Any] = {"run_id": run_id, "request": request, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    ctx.emit("run_start", "run", "Agent 실행 시작", request, {"run_id": run_id, "peer_override": peers, "parent_run_id": parent_run_id})
+    result: dict[str, Any] = {"run_id": run_id, "request": request, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              "peer_override": peers, "parent_run_id": parent_run_id}
     try:
-        state = build_graph(ctx).invoke({"request": request})
+        state = build_graph(ctx).invoke({"request": request, "peer_override": peers or []})
         result.update({
             "status": "ok",
             "target": state["target"],

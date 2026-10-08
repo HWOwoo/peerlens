@@ -45,3 +45,21 @@ def test_unknown_metric_404(client):
 
 def test_request_validation(client):
     assert client.post("/api/compare", json={"target": "", "peers": []}).status_code == 422
+
+
+def test_agent_stream_rejects_bad_peers(client):
+    r = client.get("/api/agent/stream", params={"q": "NVDA 메모 써줘", "peers": "AMD,<script>"})
+    assert r.status_code == 422
+    r = client.get("/api/agent/stream", params={"q": "NVDA 메모 써줘", "peers": ",".join(f"T{i}" for i in range(9))})
+    assert r.status_code == 422
+
+
+def test_pdf_requires_finished_run(client, tmp_path, monkeypatch):
+    import json
+
+    from peerlens import api
+
+    monkeypatch.setattr(api, "RUNS_DIR", tmp_path)
+    (tmp_path / "r1.json").write_text(json.dumps({"run_id": "r1", "status": "error"}), encoding="utf-8")
+    assert client.get("/api/agent/runs/r1/pdf").status_code == 409
+    assert client.get("/api/agent/runs/nope/pdf").status_code == 404

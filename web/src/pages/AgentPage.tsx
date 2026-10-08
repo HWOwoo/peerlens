@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type AgentResult, type TraceEvent } from "../api";
+import { CompanyPicker } from "../components/CompanyPicker";
 import { ComparisonView } from "../components/ComparisonView";
 import { EvidencePanel, MemoView } from "../components/MemoView";
 import { TraceTimeline } from "../components/TraceTimeline";
@@ -50,7 +51,7 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
     return () => cancel.current?.();
   }, []);
 
-  const run = (text = q) => {
+  const run = (text = q, opts: { peers?: string[]; parent?: string } = {}) => {
     if (text.trim().length < 4 || running) return;
     cancel.current?.();
     setEvents([]);
@@ -69,8 +70,17 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
         setErr(m);
         setRunning(false);
       },
+      opts,
     );
   };
+
+  // 사람의 개입: Peer 구성 편집 → 같은 요청으로 다시 실행
+  const [peerEdit, setPeerEdit] = useState<string[] | null>(null);
+  useEffect(() => setPeerEdit(null), [result?.run_id]);
+  const currentPeers = result?.peers ?? [];
+  const editing = peerEdit ?? currentPeers;
+  const changed = peerEdit !== null && (peerEdit.length !== currentPeers.length || peerEdit.some((p) => !currentPeers.includes(p)));
+  const togglePeer = (t: string) => setPeerEdit(editing.includes(t) ? editing.filter((x) => x !== t) : [...editing, t]);
 
   const memo = result?.memo;
   const ev = memo?.evidence.find((e) => e.ref_id === evidenceId);
@@ -133,6 +143,14 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
                   <Stat label="재작성" value={`${memo.stats.revisions}회`} sub={memo.stats.warnings ? `⚠ 경고 ${memo.stats.warnings}문장` : "경고 없음"} />
                   <Stat label="인용" value={`${memo.stats.evidence_used}건`} sub={`수치 참조 ${memo.stats.metric_refs_used}개`} />
                 </section>
+                <div className="row memo-actions">
+                  <a className="btn-secondary" href={api.pdfUrl(result.run_id)} target="_blank" rel="noreferrer">PDF 내보내기</a>
+                  {result.peer_override && (
+                    <span className="card-note">
+                      사용자가 수정한 Peer 구성으로 다시 만든 메모{result.parent_run_id && <> · <a href={`?run=${result.parent_run_id}`}>수정 전 메모 보기</a></>}
+                    </span>
+                  )}
+                </div>
                 {result.notes && result.notes.length > 0 && <div className="notice">ⓘ {result.notes.join(" · ")}</div>}
                 {result.analysis && (
                   <details className="card analysis">
@@ -181,14 +199,15 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
         <section className="card" aria-label="Peer 선정">
           <div className="card-head">
             <h2 className="card-title">Peer 선정 근거</h2>
-            <span className="card-note">도구 점수 = 사업설명 유사도(임베딩) · 업종코드(SIC) · 매출 규모 → LLM이 요청 관점으로 포함·제외 판단</span>
+            <span className="card-note">도구 점수 = 사업설명 유사도(임베딩) · 업종코드(SIC) · 매출 규모 → LLM이 요청 관점으로 포함·제외 판단 · 체크해서 직접 고칠 수 있습니다</span>
           </div>
           <div className="card-body table-wrap">
             <table className="cmp peer-table">
               <thead>
                 <tr>
+                  <th>사용</th>
                   <th>기업</th>
-                  <th>선정</th>
+                  <th>Agent 판단</th>
                   <th>점수</th>
                   <th>사업설명 유사도</th>
                   <th>업종코드</th>
@@ -197,7 +216,11 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
               </thead>
               <tbody>
                 {result.peer_report.map((p) => (
-                  <tr key={p.ticker} className={p.include ? "" : "muted"}>
+                  <tr key={p.ticker} className={editing.includes(p.ticker) ? "" : "muted"}>
+                    <td>
+                      <input type="checkbox" aria-label={`${p.ticker} 사용`} checked={editing.includes(p.ticker)} disabled={running}
+                        onChange={() => togglePeer(p.ticker)} />
+                    </td>
                     <td><b>{p.ticker}</b> <span className="card-note">{p.name}</span></td>
                     <td>{p.include ? "✓ 포함" : "제외"}</td>
                     <td className="num">{p.score?.toFixed(2) ?? "–"}</td>
@@ -206,8 +229,25 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
                     <td style={{ textAlign: "left", whiteSpace: "normal" }}>{p.reason}</td>
                   </tr>
                 ))}
+                {editing.filter((t) => !result.peer_report!.some((p) => p.ticker === t)).map((t) => (
+                  <tr key={t}>
+                    <td><input type="checkbox" checked aria-label={`${t} 사용`} onChange={() => togglePeer(t)} disabled={running} /></td>
+                    <td><b>{t}</b></td>
+                    <td>사용자 추가</td>
+                    <td colSpan={4} />
+                  </tr>
+                ))}
               </tbody>
             </table>
+            <div className="row peer-edit">
+              <CompanyPicker ariaLabel="Peer 추가" placeholder="+ Peer 추가 (티커·회사명)" exclude={[result.target ?? "", ...editing]}
+                onPick={(c) => setPeerEdit([...editing, c.ticker])} />
+              <button className="btn-primary" disabled={!changed || running || editing.length === 0}
+                onClick={() => run(result.request, { peers: editing, parent: result.run_id })}>
+                {running ? "분석 중…" : `이 Peer로 다시 실행 (${editing.length}개사)`}
+              </button>
+              {changed && <button className="btn-link" onClick={() => setPeerEdit(null)}>되돌리기</button>}
+            </div>
           </div>
         </section>
       )}

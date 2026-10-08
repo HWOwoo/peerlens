@@ -197,6 +197,8 @@ export type PeerReportRow = {
 export type AgentResult = {
   run_id: string;
   request: string;
+  peer_override?: string[] | null;
+  parent_run_id?: string | null;
   status: "ok" | "error";
   error?: string;
   target?: string;
@@ -239,8 +241,18 @@ export const api = {
   agentRuns: () => request<{ run_id: string; request: string; status: string; elapsed_ms: number; started_at: string }[]>("/api/agent/runs"),
   agentRun: (id: string) => request<AgentResult>(`/api/agent/runs/${encodeURIComponent(id)}`),
   /** Agent 실행을 SSE로 구독. 반환값은 구독 취소 함수. */
-  streamAgent: (q: string, onEvent: (e: TraceEvent) => void, onDone: (r: AgentResult) => void, onError: (msg: string) => void) => {
-    const es = new EventSource(`/api/agent/stream?q=${encodeURIComponent(q)}`);
+  pdfUrl: (runId: string) => `/api/agent/runs/${encodeURIComponent(runId)}/pdf`,
+  streamAgent: (
+    q: string,
+    onEvent: (e: TraceEvent) => void,
+    onDone: (r: AgentResult) => void,
+    onError: (msg: string) => void,
+    opts: { peers?: string[]; parent?: string } = {},
+  ) => {
+    const qs = new URLSearchParams({ q });
+    if (opts.peers?.length) qs.set("peers", opts.peers.join(","));
+    if (opts.parent) qs.set("parent", opts.parent);
+    const es = new EventSource(`/api/agent/stream?${qs}`);
     let finished = false;
     es.onmessage = (m) => {
       const ev = JSON.parse(m.data);

@@ -22,9 +22,9 @@
 ## Agent 구조 (LangGraph)
 
 ```
-요청 → plan → peers → financials → ensure_index → research → write → verify ─┬→ finalize
-                                                                  ↑          │ 실패 & 재시도 < 2
-                                                                  └─ revise ←┘
+요청 → plan → peers → financials → ensure_index → research → analyze → write → verify ─┬→ finalize → (PDF)
+                                                                             ↑          │ 실패 & 재시도 < 2
+                                                                             └─ revise ←┘
 ```
 
 | 노드 | 하는 일 | 사용 도구 / 모델 |
@@ -34,9 +34,14 @@
 | financials | XBRL 수집·지표 계산 → 수치 참조 목록 생성 | get_financials, calc_metrics |
 | ensure_index | 원문 색인이 없는 Peer는 자동 색인 | index_filings |
 | research | 근거 질문마다 기업별 할당 검색 (임베딩·리랭커 1회) | search_filings |
+| analyze | 수치·근거로 논지·인사이트(강점·약점·동인·리스크)·Peer 대비·확인 항목 설계 | GPT (main) |
 | write | 출처 달린 메모. **숫자는 `[[참조ID]]`로만** 쓰고 값은 코드가 채움 | GPT (main) |
 | verify | 규칙 검사(직접 쓴 숫자·없는 참조·근거 누락) + 문장-근거 일치 판정 | GPT (fast) |
 | revise | 실패 문장만 재검색·재작성 (최대 2회), 이후에도 실패면 ⚠ 표시 | search_filings, GPT (main) |
+| (PDF) | 검증된 메모·비교표·Peer 선정 근거·출처(원문 위치 링크)를 A4 PDF로 | render_report (Playwright) |
+
+**사람의 개입**: 화면의 Peer 선정 표에서 체크를 끄거나 기업을 추가한 뒤 '이 Peer로 다시 실행'을 누르면,
+같은 요청을 고친 Peer 구성으로 다시 분석한다(Agent의 Peer 판단 단계는 건너뛰고 사용자 구성을 그대로 사용, 수정 전 메모와 연결).
 
 ```bash
 peerlens agent "NVIDIA를 반도체 Peer와 비교해서 투자 검토 메모 써줘. 특히 수익성과 중국 리스크가 궁금해."
@@ -50,6 +55,7 @@ peerlens agent "NVIDIA를 반도체 Peer와 비교해서 투자 검토 메모 �
 python -m venv .venv
 .venv/Scripts/activate          # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
+playwright install chromium     # 메모 PDF 내보내기용 (1회)
 cp .env.example .env            # SEC_USER_AGENT에 이름과 이메일 입력
 peerlens compare NVDA AMD INTC AVGO QCOM TSM ASML --years 3
 peerlens index NVDA AMD INTC AVGO QCOM TSM   # 공시 원문 색인 (.env에 COHERE_API_KEY 필요, 웹 서버는 꺼 둔 상태로)
@@ -80,8 +86,9 @@ docker run -p 8000:8000 -e SEC_USER_AGENT="이름 이메일" peerlens
 | `POST /api/compare` | `{target, peers[], years, align}` → 비교표 셀·Peer 중앙값 |
 | `GET /api/metrics/{metric_id}` | 지표 계산식 + 입력 원값의 공시 출처 |
 | `GET /api/evidence?q=` | 공시 원문 근거 검색 |
-| `GET /api/agent/stream?q=` | Agent 실행 (Server-Sent Events로 Trace 실시간 전송, 마지막에 결과) |
+| `GET /api/agent/stream?q=&peers=&parent=` | Agent 실행 (Server-Sent Events로 Trace 실시간 전송, 마지막에 결과). `peers`=사용자가 고친 Peer 구성 |
 | `GET /api/agent/runs`, `/api/agent/runs/{id}` | 실행 기록 목록·상세 |
+| `GET /api/agent/runs/{id}/pdf` | 투자 검토 메모 PDF (`data/reports/` 캐시) |
 
 CLI 출력: 터미널 비교표 + `data/output/` 에 `*_facts.csv`(원값·출처), `*_metrics.csv`(계산식·입력 fact_id·품질 플래그), `*_dataset.json`.
 
@@ -133,5 +140,7 @@ CLI 출력: 터미널 비교표 + `data/output/` 에 `*_facts.csv`(원값·출�
 | 오픈소스 | pytest | 테스트 | MIT |
 | 오픈소스 | FastAPI, uvicorn | API 서버 | MIT / BSD-3-Clause |
 | 오픈소스 | React, Vite, TypeScript | 웹 화면 | MIT / MIT / Apache-2.0 |
+| 오픈소스 | Playwright (Chromium) | 메모 PDF 생성, 평가용 화면 캡처 | Apache-2.0 (Chromium: BSD-3-Clause) |
+| 글꼴 | Noto Sans CJK (Docker 이미지) | PDF 한글 표시 | SIL Open Font License 1.1 |
 | 폰트 | Pretendard | 웹 화면 글꼴 | SIL Open Font License 1.1 |
 | 생성형 AI | Claude (Anthropic) | 코드 작성 보조 | 최종 코드는 참가자가 검토 |

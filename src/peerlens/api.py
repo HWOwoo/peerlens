@@ -97,17 +97,24 @@ RUNS_DIR = PROJECT_ROOT / "data" / "runs"
 
 
 @app.get("/api/agent/stream")
-def agent_stream(q: str = Query(min_length=4, max_length=500)) -> StreamingResponse:
+def agent_stream(
+    q: str = Query(min_length=4, max_length=500),
+    peers: str | None = Query(default=None, max_length=200, description="사용자가 고친 Peer 구성 (쉼표 구분 티커)"),
+    parent: str | None = Query(default=None, max_length=40, description="수정 전 실행 ID"),
+) -> StreamingResponse:
     """Agent 실행 과정을 Server-Sent Events로 실시간 전송. 마지막 이벤트(type=final)에 전체 결과."""
     from peerlens.agent import run_agent
 
+    peer_list = [p.upper() for p in _csv(peers) or []]
+    if len(peer_list) > 8 or any(not p.replace(".", "").replace("-", "").isalnum() for p in peer_list):
+        raise HTTPException(422, "Peer는 티커 8개까지 (쉼표 구분)")
     if not _AGENT_SLOTS.acquire(blocking=False):
         raise HTTPException(429, "다른 분석이 실행 중입니다. 잠시 후 다시 시도해 주세요.")
     events: queue.Queue[dict | None] = queue.Queue()
 
     def work() -> None:
         try:
-            result = run_agent(q, events.put)
+            result = run_agent(q, events.put, peers=peer_list or None, parent_run_id=parent)
             events.put({"type": "final", "result": result})
         finally:
             _AGENT_SLOTS.release()
@@ -140,12 +147,28 @@ def agent_runs(limit: int = Query(default=10, ge=1, le=50)) -> list[dict]:
     return out
 
 
-@app.get("/api/agent/runs/{run_id}")
-def agent_run(run_id: str) -> dict:
+def _load_run(run_id: str) -> dict:
     p = (RUNS_DIR / f"{run_id}.json").resolve()
     if not p.is_relative_to(RUNS_DIR.resolve()) or not p.exists():
         raise HTTPException(404, "실행 기록 없음")
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+@app.get("/api/agent/runs/{run_id}")
+def agent_run(run_id: str) -> dict:
+    return _load_run(run_id)
+
+
+@app.get("/api/agent/runs/{run_id}/pdf")
+def agent_run_pdf(run_id: str) -> FileResponse:
+    """render_report: 검증된 메모·비교표·Peer 선정 근거·출처를 PDF로 (한 번 만들면 캐시)."""
+    from peerlens.report.pdf import render_pdf
+
+    run = _load_run(run_id)
+    if run.get("status") != "ok":
+        raise HTTPException(409, "완료되지 않은 실행은 PDF로 만들 수 없습니다")
+    path = render_pdf(run)
+    return FileResponse(path, media_type="application/pdf", filename=f"PeerLens_{run.get('target', '')}_{run_id}.pdf")
 
 
 if WEB_DIST.exists():

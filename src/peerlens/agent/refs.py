@@ -154,8 +154,17 @@ def stray_numbers(text: str) -> list[str]:
     return re.findall(r"\d[\d,.]*\s*%?", rest)
 
 
+# COUNT 참조는 "6개사"로 렌더되는데 작성 모델이 뒤에 "개사"를 또 붙이는 경우 ("[[COUNT.peers.ALL]]개사")
+_COUNT_SUFFIX = re.compile(r"(\[\[COUNT\.[A-Za-z0-9_.]+\]\])\s*개사")
+
+
+def _tidy(text: str) -> str:
+    return _COUNT_SUFFIX.sub(r"\1", text)
+
+
 def render_text(text: str, refs: RefTable) -> tuple[str, list[dict[str, Any]]]:
     """[[ID]] → 값. (렌더된 문장, 사용한 참조 목록)"""
+    text = _tidy(text)
     used: list[dict[str, Any]] = []
 
     def sub(m: re.Match[str]) -> str:
@@ -176,6 +185,7 @@ def masked_text(text: str) -> str:
 
 def segments(text: str, refs: RefTable) -> list[dict[str, Any]]:
     """화면용: 문장을 [일반 텍스트 | 수치 참조] 조각으로 나눈다 (수치 클릭 → 출처 패널)."""
+    text = _tidy(text)
     out: list[dict[str, Any]] = []
     pos = 0
     for m in PLACEHOLDER.finditer(text):

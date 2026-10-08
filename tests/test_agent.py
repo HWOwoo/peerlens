@@ -209,3 +209,12 @@ def test_masked_text_hides_verified_numbers_for_judge():
     from peerlens.agent.refs import masked_text
 
     assert masked_text("영업이익률 [[AAA.operating_margin.TTM]]로 [[RANK.operating_margin.TTM]]") == "영업이익률 ⟨수치⟩로 ⟨수치⟩"
+
+
+def test_count_ref_suffix_not_doubled():
+    from peerlens.agent.refs import MetricRef, RefTable, render_text, segments
+
+    refs = RefTable(metrics={"COUNT.peers.ALL": MetricRef("COUNT.peers.ALL", "Peer 기업 수", 5.0, "5개사", [], "")})
+    text = "Peer [[COUNT.peers.ALL]]개사와 비교"
+    assert render_text(text, refs)[0] == "Peer 5개사와 비교"
+    assert "".join(s["text"] for s in segments(text, refs)) == "Peer 5개사와 비교"

@@ -64,7 +64,7 @@ class State(TypedDict, total=False):
 # ---- 프롬프트 -------------------------------------------------------------------
 
 PLANNER_SYSTEM = """너는 국부펀드 해외주식 리서치 Agent의 Planner다. 사용자 요청을 해석해 작업 계획을 JSON으로 만든다.
-- 사용할 수 있는 도구: find_peers(업종코드+사업설명 유사도), get_financials·calc_metrics(SEC XBRL 재무 지표), search_filings(10-K/20-F 원문 검색: business, risk_factors, mdna, market_risk 섹션)
+- 사용할 수 있는 도구: find_peers(사업설명 유사도+세부 업종+업종코드, 후보 50개사), get_financials·calc_metrics(SEC XBRL 재무 지표), search_filings(10-K/20-F 원문 검색: business, risk_factors, mdna, market_risk 섹션)
 - 지표: revenue_growth(매출 성장률), gross_margin, operating_margin, net_margin, roe, rnd_intensity(R&D 비중), fcf_margin
 - 요청에 Peer가 명시되지 않았으면 peers는 빈 목록 (도구로 자동 선정)
 - evidence_questions는 메모에 필요한 공시 근거 질문 3~4개. 요청이 강조한 관심사(예: 중국 리스크)를 반드시 포함
@@ -209,7 +209,7 @@ def peers_node(state: State, ctx: Ctx) -> State:
         return {"peer_report": report}
 
     finder = PeerFinder(service.client(), service.filing_index().embedder)
-    ctx.emit("tool", "peers", "find_peers", f"{target} · 후보군에서 업종코드+사업설명 유사도+매출 규모로 상위 12개")
+    ctx.emit("tool", "peers", "find_peers", f"{target} · 후보 50개사에서 사업설명 유사도+세부 업종+업종코드+매출 규모로 상위 12개")
     cands = finder.find(target, k=12)
     ctx.emit("tool_result", "peers", f"후보 {len(cands)}개", ", ".join(c.ticker for c in cands), [c.to_dict() for c in cands])
 
@@ -230,7 +230,7 @@ def peers_node(state: State, ctx: Ctx) -> State:
             chosen.append(c.ticker)
     report = [
         {"ticker": c.ticker, "name": c.name, "include": c.ticker in chosen, "score": c.score, "similarity": c.similarity,
-         "sic": c.sic, "sic_match": c.sic_match, "size_ratio": c.size_ratio, "tool_reason": c.reason,
+         "sic": c.sic, "sic_match": c.sic_match, "group": c.group, "group_match": c.group_match, "size_ratio": c.size_ratio, "tool_reason": c.reason,
          "reason": decided[c.ticker].reason if c.ticker in decided else "점수 순 보충"}
         for c in cands
     ]

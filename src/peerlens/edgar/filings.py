@@ -249,6 +249,9 @@ def split_sections(blocks: list[Block], form: str) -> dict[str, Section]:
         for key, sec in _split_by_toc(blocks).items():
             if key in mapping.values():  # 10-Q에는 '사업 개요'가 없다
                 sections.setdefault(key, sec)
+    if base_form == "20-F" and len(sections) < len(mapping):
+        for key, sec in _split_by_pages(blocks).items():
+            sections.setdefault(key, sec)
     return sections
 
 
@@ -321,3 +324,138 @@ def _split_by_toc(blocks: list[Block]) -> dict[str, Section]:
         if sum(len(b.text) for b in body) >= 500:
             sections[key] = Section(key=key, item="", title=blocks[idx].text, blocks=body)
     return sections
+
+
+# ---- 쪽 번호 기반 분할 (ASML처럼 연차보고서 PDF를 20-F로 낸 경우) ----
+# 본문에 Item 제목이 없고, 끝의 '20-F 대조표'(Item → 보고서 위치·쪽)로 해당 내용을 찾게 되어 있다.
+# 쪽 머리말("… Annual Report 2025 66")로 쪽 경계를 잡고, 대조표의 쪽 번호로 섹션을 모은다.
+
+_PAGE_MARK_RE = re.compile(r"^(.{10,120}?)\s+(\d{1,3})$")
+_XREF_HEAD_RE = re.compile(r"Item\s+Form 20-F caption\s+Location in this document\s+Page", re.I)
+# 대조표에서 Item 번호 + 표준 제목 (다음 Item 위치를 찾는 데만 쓴다)
+_XREF_ITEMS = [
+    ("1", r"Identity of Directors"), ("2", r"Offer Statistics"), ("3", r"Key Information"),
+    ("4", r"Information on the Company"), ("4A", r"Unresolved Staff Comments"),
+    ("5", r"Operating and Financial Review"), ("6", r"Directors, Senior Management and Employees"),
+    ("7", r"Major Shareholders"), ("8", r"Financial Information"), ("9", r"The Offer and Listing"),
+    ("10", r"Additional Information"), ("11", r"Quantitative and Qualitative Disclosures"),
+    ("12", r"Description of Securities"), ("13", r"Defaults, Dividend"),
+]
+# 표준 섹션 ← (Item, [(포함할 소항목 시작, 끝)]) — None이면 Item 전체. 앞쪽이 우선 (같은 쪽은 한 섹션에만)
+# MD&A는 영업실적(A)·추세(D)만: 유동성(B)은 재무제표 주석 쪽이 대부분이라 제외
+_XREF_SECTIONS: list[tuple[str, str, list[tuple[str | None, str | None]]]] = [
+    ("risk_factors", "3", [(r"D\. Risk Factors", None)]),
+    ("market_risk", "11", [(None, None)]),
+    ("mdna", "5", [(r"A\. Operating Results", r"B\. Liquidity"), (r"D\. Trend Information", r"E\. Critical")]),
+    ("business", "4", [(r"B\. Business Overview", r"C\. Organizational Structure")]),
+]
+_MAX_PAGES = 12  # 대조표의 한 위치에서 이어 읽는 최대 쪽 수
+# PDF 변환으로 갈라진 단어 "R ead" → "Read" (앞 단어가 대문자로 끝나면 약어 "ASM L"이라 건드리지 않음)
+_SPLIT_WORD_RE = re.compile(r"(?<![A-Za-z])(?<![A-Z] )([B-HJ-Z]) ([a-z]{2,})\b")
+
+
+def _pages(blocks: list[Block]) -> tuple[list[tuple[int, int]], set[str]]:
+    """[(쪽 번호, 머리말 블록 인덱스)], 머리말 바로 뒤에 반복되는 메뉴 줄."""
+    from collections import Counter
+
+    marks = [(i, m) for i, b in enumerate(blocks) if len(b.text) <= 140 and (m := _PAGE_MARK_RE.match(b.text))]
+    common = Counter(m.group(1) for _, m in marks).most_common(1)
+    if not common or common[0][1] < 20:
+        return [], set()
+    prefix = common[0][0]
+    pages = [(int(m.group(2)), i) for i, m in marks if m.group(1) == prefix]
+    nav = Counter(blocks[i + 1].text for _, i in pages if i + 1 < len(blocks))
+    return pages, {t for t, c in nav.items() if c >= 3}
+
+
+def _page_numbers(seg: str) -> list[int]:
+    seg = re.sub(r"\bNote \d+[A-Z]?\b|\bExhibit [\d.]+", " ", seg)  # 주석·첨부 번호는 쪽 번호가 아님
+    return [int(p) for p in re.findall(r"(?<=\s)(\d{1,3})(?=\s|$)", f" {seg} ")]
+
+
+def _xref_pages(blocks: list[Block]) -> tuple[dict[str, list[int]], set[int]]:
+    """20-F 대조표 → ({표준 섹션: [시작 쪽]}, 대조표에 나온 모든 쪽)"""
+    text = _XREF_HEAD_RE.sub(" ", " ".join(b.text for b in blocks if _XREF_HEAD_RE.search(b.text)))
+    if not text.strip():
+        return {}, set()
+    starts = sorted(
+        (m.start(), m.end(), item) for item, cap in _XREF_ITEMS
+        if (m := re.search(rf"(?<![\w.]){item}\s+{cap}", text, re.I))
+    )
+    # Item 번호·제목은 빼고 위치·쪽 부분만
+    segs = {item: text[e : (starts[n + 1][0] if n + 1 < len(starts) else len(text))] for n, (_, e, item) in enumerate(starts)}
+    out: dict[str, list[int]] = {}
+    for key, item, ranges in _XREF_SECTIONS:
+        seg = segs.get(item, "")
+        parts = []
+        for a, b in ranges:
+            m = re.search(a, seg) if a else None
+            if a and not m:
+                continue
+            part = seg[m.start():] if m else seg
+            if b and (mb := re.search(b, part)):
+                part = part[: mb.start()]
+            parts.append(part)
+        out[key] = _page_numbers(" ".join(parts))
+    return out, set(_page_numbers(" ".join(segs.values())))
+
+
+def _title_key(blocks: list[Block]) -> str:
+    t = blocks[0].text if blocks else ""
+    return re.sub(r"\s+", "", re.sub(r"\(\s*continued\s*\).*$", "", t)).lower()[:40]
+
+
+def _split_by_pages(blocks: list[Block]) -> dict[str, Section]:
+    pages, nav = _pages(blocks)
+    refs, all_refs = _xref_pages(blocks)
+    if not pages or not refs:
+        return {}
+    start_of = {p: i for p, i in pages}
+    order = [p for p, _ in pages]
+
+    def body(p: int) -> list[Block]:
+        i = start_of[p]
+        nxt = next((j for _, j in pages if j > i), len(blocks))
+        return [b for b in blocks[i + 1 : nxt] if b.text not in nav]
+
+    bodies = {p: body(p) for p in order}
+    covers = {p for p in order if sum(len(b.text) for b in bodies[p]) < 300}  # 장 표지
+
+    def run(p: int, used: set[int]) -> list[int]:
+        """p쪽부터 이어 읽기. 장 표지, 대조표의 다른 위치(제목이 바뀐 경우), 최대 쪽 수에서 멈춘다."""
+        out = [p]
+        for q in order[order.index(p) + 1 :]:
+            if q in used or q in covers or q - p >= _MAX_PAGES:
+                break
+            # 제목이 같으면 같은 글의 다음 쪽. 단 재무제표 주석은 모든 쪽 제목이 같아 대조표 쪽에서 끊는다
+            title = _title_key(bodies[q])
+            if q in all_refs and (title != _title_key(bodies[out[-1]]) or title.startswith("notesto")):
+                break
+            out.append(q)
+        return out
+
+    used: set[int] = set()
+    sections: dict[str, Section] = {}
+    for key, item, _ in _XREF_SECTIONS:
+        chosen: list[int] = []
+        for p in refs.get(key, []):
+            if p in start_of and p not in used and p not in chosen:
+                chosen += [q for q in run(p, used) if q not in chosen]
+        used.update(chosen)
+        blks = _rejoin([b for p in sorted(chosen) for b in bodies[p]])
+        if sum(len(b.text) for b in blks) >= 500:
+            title = re.sub(r"\s*\(\s*continued\s*\).*$", "", blks[0].text)[:120]
+            sections[key] = Section(key=key, item=item, title=title, blocks=blks)
+    return sections
+
+
+def _rejoin(blocks: list[Block]) -> list[Block]:
+    """PDF 줄 단위 블록 이어 붙이기: 앞 줄이 문장부호로 끝나지 않고 다음 줄이 소문자로 시작하면 같은 문단."""
+    out: list[Block] = []
+    for b in blocks:
+        text = _SPLIT_WORD_RE.sub(r"\1\2", b.text)
+        if out and not b.in_table and not out[-1].in_table and not out[-1].text.endswith(_TERMINAL) and text[:1].islower():
+            out[-1] = Block(_join([out[-1].text, text]))
+        else:
+            out.append(Block(text, in_table=b.in_table))
+    return out

@@ -30,7 +30,7 @@
 | 노드 | 하는 일 | 사용 도구 / 모델 |
 |---|---|---|
 | plan | 요청 해석 → 대상·Peer·강조 지표·근거 질문(한/영) 계획 | GPT (fast) |
-| peers | 후보 점수(사업설명 임베딩 유사도·SIC·매출 규모) → 요청 관점으로 포함·제외 판단 | find_peers, GPT (fast) |
+| peers | 후보 50개사(설계·파운드리·메모리·장비·EDA·AI 인프라·빅테크) 점수(사업설명 임베딩 유사도·SIC·매출 규모) 상위 12 → 요청 관점으로 포함·제외 판단 | find_peers, GPT (fast) |
 | financials | XBRL 수집·지표 계산 → 수치 참조 목록 생성 | get_financials, calc_metrics |
 | ensure_index | 원문 색인이 없는 Peer는 자동 색인 | index_filings |
 | research | 근거 질문마다 기업별 할당 검색 (임베딩·리랭커 1회) | search_filings |
@@ -99,7 +99,7 @@ CLI 출력: 터미널 비교표 + `data/output/` 에 `*_facts.csv`(원값·출�
 | 수집 | `edgar/client.py` | companyfacts·submissions API, User-Agent 필수, 초당 8회 제한, 지수 백오프, `data/cache/` 캐시(수집일 기록) |
 | 태그 매핑 | `metrics/tags.py` | 표준 지표 10종 → us-gaap/ifrs-full 태그 우선순위. 정의가 다른 대체 태그는 `proxy_tag` 플래그 |
 | 기간 정렬 | `metrics/facts.py` | 연간 공시(10-K/20-F/40-F) 중 기간 350~380일 값만, 같은 기간은 최신 공시 값(재작성 시 `restated` + 최초값 보존), 회계연도·달력연도 동시 부여 |
-| 원문 수집·분할 | `edgar/filings.py` | 최신 10-K/20-F 원문 → 문단 블록 → 사업·위험요인·MD&A·시장위험 섹션 (Item 제목 / 목차 기반 / PDF 줄 복원) |
+| 원문 수집·분할 | `edgar/filings.py` | 최신 10-K/20-F 원문 → 문단 블록 → 사업·위험요인·MD&A·시장위험 섹션 (Item 제목 / 목차 기반 / PDF 줄 복원 / 연차보고서형 20-F는 쪽 머리말 + '20-F 대조표'의 쪽 번호로) |
 | 청킹 | `retrieval/chunking.py` | 문단 경계 유지 ~2,200자, 재무표 행 제외, 청크마다 공시·섹션·소제목·원문 위치 링크(Text Fragment) |
 | 검색 | `retrieval/index.py` | Cohere 임베딩(의미) + BM25(키워드) → RRF 결합 → Cohere 리랭커. 단계별 순위를 결과에 기록 |
 | 계산 | `metrics/calc.py` | 성장률·매출총이익률·영업이익률·순이익률·ROE(평균자본)·R&D 비중·FCF 마진. 값마다 계산식·입력 fact_id·플래그 |

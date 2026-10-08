@@ -189,6 +189,8 @@ export type PeerReportRow = {
   similarity?: number;
   sic?: string;
   sic_match?: string;
+  group?: string | null;
+  group_match?: string;
   size_ratio?: number | null;
   tool_reason?: string;
   reason: string;

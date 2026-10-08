@@ -75,7 +75,9 @@ def _is_numeric_row(b: Block) -> bool:
         return False
     sentence_like = len(b.text) >= 60 and len(b.text.split()) >= 8 and b.text.rstrip().endswith((".", ";", ":"))
     letters = sum(ch.isalpha() for ch in b.text)
-    return not sentence_like or letters < len(b.text) * 0.5
+    words = b.text.split()
+    numeric = sum(any(ch.isdigit() for ch in w) for w in words)  # KPI 표처럼 글자는 많아도 숫자 칸이 많은 행
+    return not sentence_like or letters < len(b.text) * 0.5 or numeric > len(words) * 0.2
 
 
 def anchor_url(source_url: str, text: str, words: int = 8) -> str:

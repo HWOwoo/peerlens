@@ -199,7 +199,7 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
         <section className="card" aria-label="Peer 선정">
           <div className="card-head">
             <h2 className="card-title">Peer 선정 근거</h2>
-            <span className="card-note">도구 점수 = 사업설명 유사도(임베딩) · 업종코드(SIC) · 매출 규모 → LLM이 요청 관점으로 포함·제외 판단 · 체크해서 직접 고칠 수 있습니다</span>
+            <span className="card-note">도구 점수 = 사업설명 유사도(임베딩) · 세부 업종 · 업종코드(SIC) · 매출 규모 (후보 50개사) → LLM이 요청 관점으로 포함·제외 판단 · 체크해서 직접 고칠 수 있습니다</span>
           </div>
           <div className="card-body table-wrap">
             <table className="cmp peer-table">
@@ -210,6 +210,7 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
                   <th>Agent 판단</th>
                   <th>점수</th>
                   <th>사업설명 유사도</th>
+                  <th>세부 업종</th>
                   <th>업종코드</th>
                   <th style={{ textAlign: "left" }}>판단 이유</th>
                 </tr>
@@ -225,6 +226,7 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
                     <td>{p.include ? "✓ 포함" : "제외"}</td>
                     <td className="num">{p.score?.toFixed(2) ?? "–"}</td>
                     <td className="num">{p.similarity?.toFixed(2) ?? "–"}</td>
+                    <td>{p.group ? `${p.group} (${p.group_match})` : "–"}</td>
                     <td>{p.sic ? `${p.sic} (${p.sic_match})` : "–"}</td>
                     <td style={{ textAlign: "left", whiteSpace: "normal" }}>{p.reason}</td>
                   </tr>
@@ -234,7 +236,7 @@ export function AgentPage({ onOpenMetric, activeMetric }: { onOpenMetric: (id: s
                     <td><input type="checkbox" checked aria-label={`${t} 사용`} onChange={() => togglePeer(t)} disabled={running} /></td>
                     <td><b>{t}</b></td>
                     <td>사용자 추가</td>
-                    <td colSpan={4} />
+                    <td colSpan={5} />
                   </tr>
                 ))}
               </tbody>

@@ -161,3 +161,32 @@ def test_search_filters_and_reports_stage_ranks(index):
     assert hits and all(h.chunk["section"] == "risk_factors" for h in hits)
     assert hits[0].rank == 1 and hits[0].fused_rank >= 1
     assert index.search("anything", tickers=["NONE"]) == []
+
+
+def test_split_by_pages_annual_report_style_20f():
+    """ASML형: Item 제목 없이 쪽 머리말 + 끝의 20-F 대조표로 섹션을 찾는다."""
+    titles = {1: "Our business", 2: "Our business (continued)", 3: "Risk factors", 4: "Risk factors (continued)",
+              5: "Financial performance", 6: "Corporate governance"}
+    blocks: list[Block] = []
+    for page in range(1, 25):
+        blocks += [Block(f"STRATEGIC REPORT ACME Annual Report 2025 {page}", in_table=True), Block("Overview Business Risk")]
+        title = titles.get(page, f"Other topic {page}")
+        blocks.append(Block(title))
+        blocks += [Block(f"{title} body sentence number one describes the company in detail.")] * 6
+        blocks += [Block("A wrapped sentence that ends without punctuation and"), Block("continues on the next line.")]  # → 한 문단
+    blocks.append(Block(
+        "Item Form 20-F caption Location in this document Page Part I 3 Key information D. Risk Factors Risk factors 3 "
+        "4 Information on the Company A. History Cover page 1 B. Business Overview Our business 1 Note 2 Revenue 20 "
+        "C. Organizational Structure Corporate governance 6 5 Operating and Financial Review and Prospects "
+        "A. Operating Results Financial performance 5 B. Liquidity and Capital Resources Note 4 Cash 21 "
+        "11 Quantitative and Qualitative Disclosures About Market Risk Note 25 Financial risk management 22", in_table=True))
+    secs = split_sections(blocks, "20-F")
+    assert secs["risk_factors"].title == "Risk factors" and secs["risk_factors"].item == "3"
+    assert {b.text.split(" body")[0] for b in secs["risk_factors"].blocks if "body" in b.text} == {"Risk factors", "Risk factors (continued)"}
+    assert {b.text.split(" body")[0] for b in secs["business"].blocks if "body" in b.text} >= {"Our business", "Our business (continued)", "Other topic 20"}
+    assert "Corporate governance" not in {b.text for b in secs["business"].blocks}  # 대조표의 다른 위치(6쪽)에서 멈춤
+    assert secs["mdna"].title == "Financial performance"
+    assert not any("Other topic 21" in b.text for s in secs.values() for b in s.blocks)  # 유동성(B) 쪽은 제외
+    assert secs["market_risk"].blocks[0].text.startswith("Other topic 22")
+    assert any(b.text == "A wrapped sentence that ends without punctuation and continues on the next line." for b in secs["mdna"].blocks)
+    assert all("Annual Report 2025" not in b.text and b.text != "Overview Business Risk" for s in secs.values() for b in s.blocks)
